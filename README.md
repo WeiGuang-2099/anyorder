@@ -71,7 +71,14 @@ control that differs only in the fix.
 ## Limits
 
 * Invariants are checked only when all agents have finished.
-* A tool that raises ends the run.
+* A tool that raises does not end the run. Its agent gets the error's
+  class name and text as the result of the call, and may ignore it. A call
+  with the wrong arguments is such an error. A call to a tool the world
+  lacks still ends the run, and so does an interrupt or one of the
+  scheduler's own errors raised inside a tool.
+* A call's arguments and a tool's result are kept in the trace by
+  reference, so a list that is passed in or returned shows its final
+  content.
 * Search is uniform random or exhaustive. Neither prunes equivalent
   schedules or shrinks a failing one.
 * Exhaustive search has no bound. Every agent must finish under every

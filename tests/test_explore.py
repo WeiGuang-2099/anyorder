@@ -274,3 +274,62 @@ def test_seeded_failure_is_one_of_the_exhaustive_failures():
     failure = explore.explore(scenario, range(20))
     assert failure is not None
     assert failure.result in _runs(scenario)
+
+
+def test_exhaust_replays_runs_whose_tool_raised():
+    class Door:
+        """Opens once. Pushing it again raises."""
+
+        def __init__(self) -> None:
+            self.open = False
+
+        def push(self) -> None:
+            if self.open:
+                raise RuntimeError("already open")
+            self.open = True
+
+    async def pusher(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("push")
+
+    scenario = scheduler.Scenario(
+        name="door",
+        make_world=Door,
+        agents={"a": pusher, "b": pusher},
+        invariants=(),
+    )
+    runs = _runs(scenario)
+    assert [run.schedule for run in runs] == [("a", "b"), ("b", "a")]
+    # Whoever pushes second is told so, in both runs and in their replays.
+    assert all(
+        [step.result for step in run.steps]
+        == [None, scheduler.Raised("RuntimeError", "already open")]
+        for run in runs)
+
+
+def test_exhaust_refuses_a_tool_error_that_changes_between_runs():
+    tickets = itertools.count()
+
+    class Desk:
+        def take(self) -> None:
+            raise RuntimeError(f"ticket {next(tickets)} is void")
+
+    async def taker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("take")
+
+    scenario = scheduler.Scenario(
+        name="desk",
+        make_world=Desk,
+        agents={"a": taker},
+        invariants=(),
+    )
+    with pytest.raises(
+            scheduler.ReplayDivergenceError, match="schedule 'a' of 'desk'"):
+        next(explore.exhaust(scenario))
+
+
+@pytest.mark.parametrize("buyers", [2, 3])
+def test_every_schedule_of_the_control_sells_the_one_unit(buyers):
+    # A control whose calls all failed would pass too, and show nothing.
+    for run in _runs(oversell.atomic(buyers=buyers)):
+        results = collections.Counter(step.result for step in run.steps)
+        assert results == {True: 1, False: buyers - 1}

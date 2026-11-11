@@ -63,6 +63,35 @@ def _kept(
     return start
 
 
+class _Till:
+    """A world whose tool raises when asked for more than it holds."""
+
+    def __init__(self) -> None:
+        self.cash = 5
+
+    def take(self, amount: int) -> int:
+        if amount > self.cash:
+            raise ValueError(f"only {self.cash} left")
+        self.cash -= amount
+        return self.cash
+
+
+async def _taker(ctx: scheduler.AgentContext) -> None:
+    """Asks for 4 and, when the till raises, for 1."""
+    left = await ctx.call("take", amount=4)
+    if isinstance(left, scheduler.Raised):
+        await ctx.call("take", amount=1)
+
+
+def _till(**agents: scheduler.Agent) -> scheduler.Scenario:
+    return scheduler.Scenario(
+        name="till",
+        make_world=_Till,
+        agents=agents or {"a": _taker, "b": _taker},
+        invariants=(),
+    )
+
+
 def test_same_seed_gives_same_trace():
     first = scheduler.run(_scenario(), scheduler.RandomPolicy(7))
     second = scheduler.run(_scenario(), scheduler.RandomPolicy(7))
@@ -209,3 +238,54 @@ def test_unsupported_await_survives_a_tool_call_while_closing():
 
     with pytest.raises(scheduler.UnsupportedAwaitError, match="'a'"):
         scheduler.run(_scenario(a=sleeper), scheduler.RandomPolicy(0))
+
+
+def test_tool_that_raises_returns_its_error_to_the_agent():
+    result = scheduler.run(_till(), scheduler.ReplayPolicy(["a", "b", "b"]))
+    # b is told that the till raised, and goes on to ask for less.
+    assert [step.result for step in result.steps] == [
+        1, scheduler.Raised("ValueError", "only 1 left"), 0]
+    assert result.steps[2].args == {"amount": 1}
+
+
+def test_tool_error_is_equal_from_run_to_run():
+    first = scheduler.run(_till(), scheduler.ReplayPolicy(["a", "b", "b"]))
+    second = scheduler.run(_till(), scheduler.ReplayPolicy(["a", "b", "b"]))
+    assert first == second
+
+
+def test_wrong_arguments_are_a_tool_error():
+    async def clumsy(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("take", sum=4)
+
+    result = scheduler.run(_till(a=clumsy), scheduler.ReplayPolicy(["a"]))
+    error = result.steps[0].result
+    assert isinstance(error, scheduler.Raised)
+    # Only the kind: the text is the interpreter's and changes with it.
+    assert error.kind == "TypeError"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        scheduler.ReplayDivergenceError("from a tool"),
+        scheduler.SchedulerError("from a tool"),
+        KeyboardInterrupt(),
+    ],
+    ids=["divergence", "refusal", "interrupt"])
+def test_error_that_is_not_the_agents_to_handle_ends_the_run(error):
+    class Alarm:
+        def pull(self) -> None:
+            raise error
+
+    async def puller(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("pull")
+
+    scenario = scheduler.Scenario(
+        name="alarm",
+        make_world=Alarm,
+        agents={"a": puller},
+        invariants=(),
+    )
+    with pytest.raises(type(error)):
+        scheduler.run(scenario, scheduler.RandomPolicy(0))

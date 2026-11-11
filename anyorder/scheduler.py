@@ -65,7 +65,7 @@ class AgentContext:
             **args: Keyword arguments for the call.
 
         Returns:
-            Whatever the tool returns.
+            Whatever the tool returns, or a Raised if the tool raised.
         """
         return await Effect(tool, args)
 
@@ -94,6 +94,22 @@ class Scenario:
 
 
 @dataclasses.dataclass(frozen=True)
+class Raised:
+    """What a call gives its agent when the tool raised.
+
+    A value and not the exception: two exceptions alike do not compare
+    equal, and a run must compare equal to its replay.
+
+    Attributes:
+        kind: Name of the exception's class.
+        message: The exception as text.
+    """
+
+    kind: str
+    message: str
+
+
+@dataclasses.dataclass(frozen=True)
 class Step:
     """One tool call that ran.
 
@@ -101,7 +117,7 @@ class Step:
         agent: The agent the policy chose.
         tool: The tool it called.
         args: The call's keyword arguments.
-        result: What the tool returned.
+        result: What the tool returned, or a Raised if it raised.
     """
 
     agent: str
@@ -239,14 +255,25 @@ def _close(coroutine: Coroutine[Any, Any, None]) -> None:
 
 
 def _apply(world: Any, effect: Effect) -> Any:
-    """Calls the effect's tool on the world."""
+    """Calls the effect's tool on the world.
+
+    Returns:
+        What the tool returned, or a Raised if it raised.
+    """
     tool = None
     if not effect.tool.startswith("_"):
         tool = getattr(world, effect.tool, None)
     if not callable(tool):
         raise UnknownToolError(
             f"{type(world).__name__} has no tool {effect.tool!r}")
-    return tool(**effect.args)
+    try:
+        return tool(**effect.args)
+    except SchedulerError:
+        # A refusal is never the agent's to handle, least of all a replay
+        # that left its schedule.
+        raise
+    except Exception as error:
+        return Raised(type(error).__name__, str(error))
 
 
 def _first_violation(scenario: Scenario, world: Any) -> str | None:
