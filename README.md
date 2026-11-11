@@ -15,6 +15,7 @@ Early. What works today:
 * A deterministic scheduler. Agents are coroutines, every tool call is a
   scheduling point, and nothing reads the clock or starts a thread.
 * Seeded random search over schedules.
+* Exhaustive search over every schedule of a small scenario.
 * Replay of a recorded schedule. A run that leaves its schedule is refused,
   not tolerated.
 * One example scenario, an oversell, with a control that must pass.
@@ -53,6 +54,8 @@ Run one after the other, the same two buyers sell one unit.
 * `explore.explore` runs one random schedule per seed until an invariant
   fails. It replays the failing schedule and checks that the trace is the
   same before returning it.
+* `explore.exhaust` runs every complete schedule of a scenario, depth
+  first, and replays each run before yielding it.
 * `explore.replay` runs a scenario under a given schedule.
 
 Seeds find schedules. The schedule is what a failure is stored and reported
@@ -69,8 +72,13 @@ control that differs only in the fix.
 
 * Invariants are checked only when all agents have finished.
 * A tool that raises ends the run.
-* Search is uniform random. It does not prune equivalent schedules or shrink
-  a failing one.
+* Search is uniform random or exhaustive. Neither prunes equivalent
+  schedules or shrinks a failing one.
+* Exhaustive search has no bound. Every agent must finish under every
+  schedule, and the number of schedules can grow exponentially with the
+  number of calls and factorially with the number of agents.
+* Replaying a run checks that it gives the same trace twice. That probes
+  whether a scenario is deterministic and does not prove it.
 * The example world is synthetic. Nothing here has been run against a real
   agent framework or a real model.
 
