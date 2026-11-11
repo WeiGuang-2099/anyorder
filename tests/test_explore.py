@@ -1,6 +1,7 @@
 """Checks schedule search and replay on the oversell and other scenarios."""
 
 import collections
+import dataclasses
 import itertools
 from collections.abc import Collection, Mapping, Sequence
 
@@ -13,6 +14,8 @@ from anyorder.scenarios import oversell
 _SERIAL = ("buyer-1", "buyer-1", "buyer-1", "buyer-2")
 _BOTH_READ_FIRST = (
     "buyer-1", "buyer-2", "buyer-1", "buyer-1", "buyer-2", "buyer-2")
+_ALWAYS_FAILS = scheduler.Invariant(
+    "always-fails", lambda world: "always fails", every_step=False)
 
 
 class _Bell:
@@ -90,7 +93,8 @@ def test_search_finds_the_oversell():
     failure = explore.explore(oversell.naive(), range(20))
     assert failure is not None
     assert failure.result.violation is not None
-    assert "2 orders placed against a stock of 1" in failure.result.violation
+    assert "2 orders placed against a stock of 1" in (
+        failure.result.violation.message)
 
 
 def test_failure_replays_from_its_schedule_alone():
@@ -108,8 +112,10 @@ def test_serial_buyers_do_not_oversell():
 
 def test_two_reads_before_a_write_oversell():
     result = explore.replay(oversell.naive(), _BOTH_READ_FIRST)
-    assert result.violation == (
-        "2 orders placed against a stock of 1: buyer-1, buyer-2")
+    assert result.violation == scheduler.Violation(
+        "no-oversell",
+        "2 orders placed against a stock of 1: buyer-1, buyer-2",
+        6)
 
 
 @pytest.mark.parametrize("stock,buyers", [(1, 2), (2, 5), (3, 3)])
@@ -124,7 +130,7 @@ def test_replay_refuses_steps_left_over():
 
 
 def test_search_refuses_a_failure_that_does_not_replay():
-    scenario = _leaky((lambda world: "always fails",))
+    scenario = _leaky((_ALWAYS_FAILS,))
     with pytest.raises(scheduler.ReplayDivergenceError, match="'leaky'"):
         explore.explore(scenario, range(1))
 
@@ -200,14 +206,15 @@ def test_agents_that_make_no_call_have_one_empty_schedule():
         name="idle",
         make_world=_Bell,
         agents={"a": idle, "b": idle},
-        invariants=(lambda world: "always fails",),
+        invariants=(_ALWAYS_FAILS,),
     )
     # The empty schedule is still a run: it is checked and it can fail.
-    assert _runs(scenario) == [scheduler.RunResult((), "always fails")]
+    assert _runs(scenario) == [scheduler.RunResult(
+        (), scheduler.Violation("always-fails", "always fails", 0))]
 
 
 @pytest.mark.parametrize(
-    "invariants", [(lambda world: "always fails",), ()],
+    "invariants", [(_ALWAYS_FAILS,), ()],
     ids=["failing", "passing"])
 def test_exhaust_refuses_a_run_that_does_not_replay(invariants):
     # One next, not a list: the refusal must come before the run is handed
@@ -238,7 +245,9 @@ def test_exhaust_refuses_a_run_whose_verdict_does_not_replay():
         name="shared-log",
         make_world=Log,
         agents={"a": writer},
-        invariants=(one_entry,),
+        invariants=(
+            scheduler.Invariant("one-entry", one_entry, every_step=False),
+        ),
     )
     # The run and its replay make the same call with the same result. Only
     # the verdict differs: the run passes and its replay fails.
@@ -333,3 +342,58 @@ def test_every_schedule_of_the_control_sells_the_one_unit(buyers):
     for run in _runs(oversell.atomic(buyers=buyers)):
         results = collections.Counter(step.result for step in run.steps)
         assert results == {True: 1, False: buyers - 1}
+
+
+def test_exhaust_refuses_a_violation_seen_at_another_step_in_replay():
+    asked = itertools.count(1)
+
+    def patient(world: _Bell) -> str | None:
+        """Fails from the third time it is asked, whatever the world."""
+        return "asked too often" if next(asked) >= 3 else None
+
+    scenario = dataclasses.replace(
+        _ringers({"a": 2}),
+        invariants=(
+            scheduler.Invariant("patient", patient, every_step=True),))
+    # The run is asked on the fresh world and after each of its two steps,
+    # and fails at step 2. Its replay fails at once: the same steps and
+    # the same message, at step 0.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError, match="schedule 'a a' of 'bell'"):
+        next(explore.exhaust(scenario))
+
+
+def test_two_buyer_oversell_is_seen_at_the_last_step():
+    # The invariant first breaks when the second order is placed, and in a
+    # failing run of two buyers that is the last of its six calls.
+    failing = [
+        run for run in _runs(oversell.naive()) if run.violation is not None]
+    assert {run.violation.invariant for run in failing} == {"no-oversell"}
+    assert {run.violation.step for run in failing} == {6}
+
+
+def test_three_buyer_oversell_is_seen_at_the_second_order():
+    # Two read 1 (144 runs of 7 steps): after the two reads, the second
+    # order is the last of the four calls of those two buyers. The read of
+    # 0 comes after it in 3 * 2 * 6 = 36 runs, which see the break at step
+    # 6, and before it in the other 108, at step 7.
+    # Three read 1 (540 runs of 9 steps): after the three reads, the second
+    # order is the fourth of the six calls left when the first four are
+    # those of two buyers: 3 pairs of buyers in 6 ways each, so
+    # 6 * 18 = 108 runs, at step 7. In the other 6 * 72 = 432 it is the
+    # fifth, at step 8. It is never the sixth: a third order follows it.
+    # 36 at step 6, 108 + 108 = 216 at step 7, 432 at step 8.
+    failing = [
+        run for run in _runs(oversell.naive(buyers=3))
+        if run.violation is not None]
+    assert collections.Counter(run.violation.step for run in failing) == {
+        6: 36, 7: 216, 8: 432}
+    for run in failing:
+        seen = run.steps[:run.violation.step]
+        assert seen[-1].tool == "place_order"
+        assert sum(step.tool == "place_order" for step in seen) == 2
+        # The message is that of the moment the invariant broke.
+        assert run.violation.message.startswith("2 orders placed")
+    # A run goes on to its end after the violation.
+    assert collections.Counter(len(run.steps) for run in failing) == {
+        7: 144, 9: 540}

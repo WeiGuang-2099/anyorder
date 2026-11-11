@@ -25,7 +25,7 @@ def main() -> int:
         return 0
     result = failure.result
     print(f"{scenario.name}: violation found at seed {failure.seed}")
-    print(f"  {result.violation}")
+    print(f"  {result.violation.message}")
     print(f"schedule: {' '.join(result.schedule)}")
     for index, step in enumerate(result.steps, start=1):
         print(_format_step(index, step))

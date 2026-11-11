@@ -77,5 +77,7 @@ def _scenario(
         name=name,
         make_world=functools.partial(Inventory, stock),
         agents={f"buyer-{i}": buyer for i in range(1, buyers + 1)},
-        invariants=(no_oversell,),
+        invariants=(
+            scheduler.Invariant("no-oversell", no_oversell, every_step=True),
+        ),
     )

@@ -71,7 +71,25 @@ class AgentContext:
 
 
 Agent = Callable[[AgentContext], Coroutine[Any, Any, None]]
-Invariant = Callable[[Any], str | None]
+
+
+@dataclasses.dataclass(frozen=True)
+class Invariant:
+    """Something that must stay true of the world, and when.
+
+    Attributes:
+        name: Says which invariant a violation broke. The message cannot:
+            it changes with the schedule.
+        check: Returns a message when the world violates the invariant and
+            None otherwise.
+        every_step: True if it must hold on the fresh world and after every
+            step, False if only once every agent has finished. It has no
+            default, so that each invariant says which.
+    """
+
+    name: str
+    check: Callable[[Any], str | None]
+    every_step: bool = dataclasses.field(kw_only=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -83,8 +101,8 @@ class Scenario:
         make_world: Builds a fresh world for each run. A world shared
             between runs breaks replay.
         agents: Agent functions by name.
-        invariants: Checks made on the world once every agent has finished.
-            Each returns a message when it is violated and None otherwise.
+        invariants: What must stay true of the world. Each says when it
+            must hold.
     """
 
     name: str
@@ -127,16 +145,34 @@ class Step:
 
 
 @dataclasses.dataclass(frozen=True)
+class Violation:
+    """An invariant that did not hold, and where a run first saw that.
+
+    Attributes:
+        invariant: The invariant's name.
+        message: What its check returned.
+        step: How many steps had run when the check failed: 0 for the fresh
+            world. For an invariant that must hold only at the end it is
+            the length of the run, and does not point at a cause.
+    """
+
+    invariant: str
+    message: str
+    step: int
+
+
+@dataclasses.dataclass(frozen=True)
 class RunResult:
     """The trace of one run and what it broke, if anything.
 
     Attributes:
-        steps: Every tool call, in the order it ran.
-        violation: The message of the first invariant that failed, or None.
+        steps: Every tool call, in the order it ran. A run goes on to its
+            end after a violation.
+        violation: The first violation the run saw, or None.
     """
 
     steps: tuple[Step, ...]
-    violation: str | None
+    violation: Violation | None
 
     @property
     def schedule(self) -> tuple[str, ...]:
@@ -194,7 +230,10 @@ def run(scenario: Scenario, policy: Policy) -> RunResult:
             one agent is waiting, so a schedule has one entry per step.
 
     Returns:
-        The trace and the first violated invariant, if any.
+        The trace and the first violation, if any. Invariants that must
+        hold after every step are asked on the fresh world and after each
+        step, the others once every agent has finished. Nothing is asked
+        after the first violation.
 
     Raises:
         UnknownToolError: An agent called a tool the world lacks.
@@ -207,19 +246,27 @@ def run(scenario: Scenario, policy: Policy) -> RunResult:
     try:
         for name, agent in scenario.agents.items():
             _advance(pending, name, agent(AgentContext(name)), None)
+        violation = _first_violation(scenario, world, 0, every_step=True)
         while pending:
             name = policy.choose(sorted(pending))
             coroutine, effect = pending[name]
             result = _apply(world, effect)
-            # Not sooner: a refused call leaves its agent here to be closed.
-            del pending[name]
             steps.append(Step(name, effect.tool, dict(effect.args), result))
+            if violation is None:
+                violation = _first_violation(
+                    scenario, world, len(steps), every_step=True)
+            # Not sooner: an error raised above leaves the agent here to be
+            # closed.
+            del pending[name]
             _advance(pending, name, coroutine, result)
     finally:
         # An error leaves agents suspended mid-call.
         for coroutine, _ in pending.values():
             _close(coroutine)
-    return RunResult(tuple(steps), _first_violation(scenario, world))
+    if violation is None:
+        violation = _first_violation(
+            scenario, world, len(steps), every_step=False)
+    return RunResult(tuple(steps), violation)
 
 
 def _advance(
@@ -276,9 +323,24 @@ def _apply(world: Any, effect: Effect) -> Any:
         return Raised(type(error).__name__, str(error))
 
 
-def _first_violation(scenario: Scenario, world: Any) -> str | None:
+def _first_violation(
+    scenario: Scenario, world: Any, step: int, *, every_step: bool
+) -> Violation | None:
+    """Asks the invariants of one kind, in the order listed.
+
+    Args:
+        scenario: Whose invariants to ask.
+        world: The world as it is now.
+        step: How many steps have run.
+        every_step: Which kind to ask.
+
+    Returns:
+        The first one that does not hold, or None.
+    """
     for invariant in scenario.invariants:
-        message = invariant(world)
+        if invariant.every_step != every_step:
+            continue
+        message = invariant.check(world)
         if message is not None:
-            return message
+            return Violation(invariant.name, message, step)
     return None

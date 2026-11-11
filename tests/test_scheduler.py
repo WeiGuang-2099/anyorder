@@ -1,6 +1,8 @@
-"""Checks the scheduler's ordering and its refusals."""
+"""Checks the scheduler's ordering, refusals, tool errors and invariants."""
 
 import asyncio
+import dataclasses
+import functools
 import inspect
 from collections.abc import Coroutine
 from typing import Any
@@ -89,6 +91,60 @@ def _till(**agents: scheduler.Agent) -> scheduler.Scenario:
         make_world=_Till,
         agents=agents or {"a": _taker, "b": _taker},
         invariants=(),
+    )
+
+
+class _Lamp:
+    """A lamp that each switch turns on or off."""
+
+    def __init__(self, lit: bool) -> None:
+        self.lit = lit
+        self.switches = 0
+
+    def switch(self) -> None:
+        self.lit = not self.lit
+        self.switches += 1
+
+
+def _dark(lamp: _Lamp) -> str | None:
+    return "the lamp is lit" if lamp.lit else None
+
+
+def _switched_once(lamp: _Lamp) -> str | None:
+    if lamp.switches < 2:
+        return None
+    return f"switched {lamp.switches} times"
+
+
+def _broken(lamp: _Lamp) -> str | None:
+    """A check that raises whenever it is asked."""
+    raise KeyError("broken check")
+
+
+def _tripped(lamp: _Lamp) -> str | None:
+    """A check that raises once the lamp has been switched."""
+    if lamp.switches:
+        raise KeyError("broken check")
+    return None
+
+
+_ALWAYS_DARK = scheduler.Invariant("always-dark", _dark, every_step=True)
+_DARK_AT_END = scheduler.Invariant("dark-at-end", _dark, every_step=False)
+
+
+def _lamp(
+    switches: int, *invariants: scheduler.Invariant, lit: bool = False
+) -> scheduler.Scenario:
+    """One agent that switches a lamp a number of times."""
+    async def switcher(ctx: scheduler.AgentContext) -> None:
+        for _ in range(switches):
+            await ctx.call("switch")
+
+    return scheduler.Scenario(
+        name="lamp",
+        make_world=functools.partial(_Lamp, lit),
+        agents={"a": switcher},
+        invariants=invariants,
     )
 
 
@@ -289,3 +345,120 @@ def test_error_that_is_not_the_agents_to_handle_ends_the_run(error):
     )
     with pytest.raises(type(error)):
         scheduler.run(scenario, scheduler.RandomPolicy(0))
+
+
+def test_invariant_has_to_say_when_it_must_hold():
+    with pytest.raises(TypeError, match="every_step"):
+        scheduler.Invariant("always-dark", _dark)
+    # By keyword, so that the scenario shows which of the two it is.
+    with pytest.raises(TypeError, match="positional"):
+        scheduler.Invariant("always-dark", _dark, True)
+
+
+def test_every_step_invariant_sees_a_state_that_is_gone_by_the_end():
+    result = scheduler.run(_lamp(2, _ALWAYS_DARK), scheduler.RandomPolicy(0))
+    assert result.violation == scheduler.Violation(
+        "always-dark", "the lamp is lit", 1)
+    # The run goes on to its end after the violation.
+    assert len(result.steps) == 2
+
+
+def test_end_invariant_passes_a_state_that_is_gone_by_the_end():
+    result = scheduler.run(_lamp(2, _DARK_AT_END), scheduler.RandomPolicy(0))
+    assert result.violation is None
+
+
+def test_end_invariant_fails_with_the_length_of_the_run():
+    # Lit after the first switch too, which an invariant asked only at the
+    # end does not see.
+    result = scheduler.run(_lamp(3, _DARK_AT_END), scheduler.RandomPolicy(0))
+    assert result.violation == scheduler.Violation(
+        "dark-at-end", "the lamp is lit", 3)
+
+
+def test_every_step_invariant_is_checked_on_the_fresh_world():
+    result = scheduler.run(
+        _lamp(2, _ALWAYS_DARK, lit=True), scheduler.RandomPolicy(0))
+    assert result.violation == scheduler.Violation(
+        "always-dark", "the lamp is lit", 0)
+    assert len(result.steps) == 2
+
+
+@pytest.mark.parametrize(
+    "invariant", [_ALWAYS_DARK, _DARK_AT_END], ids=["every-step", "at-end"])
+def test_run_with_no_steps_checks_both_kinds(invariant):
+    result = scheduler.run(
+        _lamp(0, invariant, lit=True), scheduler.RandomPolicy(0))
+    assert result == scheduler.RunResult(
+        (), scheduler.Violation(invariant.name, "the lamp is lit", 0))
+
+
+def test_earlier_violation_beats_earlier_listing():
+    once = scheduler.Invariant("once", _switched_once, every_step=True)
+    result = scheduler.run(
+        _lamp(3, once, _ALWAYS_DARK), scheduler.RandomPolicy(0))
+    # Listed second, but the lamp is lit one step before the second switch.
+    assert result.violation == scheduler.Violation(
+        "always-dark", "the lamp is lit", 1)
+
+
+def test_violations_at_one_moment_keep_the_order_listed():
+    lit = scheduler.Invariant(
+        "lit", lambda lamp: "starts lit", every_step=True)
+    result = scheduler.run(
+        _lamp(1, lit, _ALWAYS_DARK, lit=True), scheduler.RandomPolicy(0))
+    assert result.violation == scheduler.Violation("lit", "starts lit", 0)
+
+
+def test_every_step_invariants_are_asked_before_end_invariants():
+    result = scheduler.run(
+        _lamp(0, _DARK_AT_END, _ALWAYS_DARK, lit=True),
+        scheduler.RandomPolicy(0))
+    assert result.violation is not None
+    assert result.violation.invariant == "always-dark"
+
+
+@pytest.mark.parametrize("every_step", [True, False])
+def test_nothing_is_asked_after_the_first_violation(every_step):
+    # A check can raise on a world that is already broken. Asking it then
+    # would lose the violation that came first. The lamp is lit at step 1,
+    # where the second check would already raise.
+    fragile = scheduler.Invariant("fragile", _tripped, every_step=every_step)
+    result = scheduler.run(
+        _lamp(2, _ALWAYS_DARK, fragile), scheduler.RandomPolicy(0))
+    assert result.violation == scheduler.Violation(
+        "always-dark", "the lamp is lit", 1)
+
+
+def test_every_step_invariant_is_asked_after_a_call_that_raised():
+    class Bulb(_Lamp):
+        """A lamp whose switch lights it and then raises."""
+
+        def switch(self) -> None:
+            super().switch()
+            raise RuntimeError("the bulb blew")
+
+    scenario = dataclasses.replace(
+        _lamp(1, _ALWAYS_DARK), make_world=functools.partial(Bulb, False))
+    result = scheduler.run(scenario, scheduler.RandomPolicy(0))
+    # What the tool did before it raised stays done, and is checked.
+    assert result.steps[0].result == scheduler.Raised(
+        "RuntimeError", "the bulb blew")
+    assert result.violation == scheduler.Violation(
+        "always-dark", "the lamp is lit", 1)
+
+
+# _broken raises on the fresh world, _tripped after the first step, when
+# the agent that took it is still waiting for its result.
+@pytest.mark.parametrize("check", [_broken, _tripped])
+@pytest.mark.parametrize("every_step", [True, False])
+def test_invariant_that_raises_ends_the_run_with_its_error(check, every_step):
+    fragile = scheduler.Invariant("fragile", check, every_step=every_step)
+    scenario = _lamp(2, fragile)
+    coroutines = {}
+    scenario = dataclasses.replace(
+        scenario, agents={"a": _kept(scenario.agents["a"], coroutines)})
+    # Neither a violation nor a pass: the scenario itself is wrong.
+    with pytest.raises(KeyError, match="broken check"):
+        scheduler.run(scenario, scheduler.RandomPolicy(0))
+    assert inspect.getcoroutinestate(coroutines["a"]) == inspect.CORO_CLOSED

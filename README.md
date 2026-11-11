@@ -64,13 +64,15 @@ as.
 ## Writing a scenario
 
 A scenario is a world (any object whose public methods are the tools), a set
-of agents, and invariants checked once every agent has finished. See
-`anyorder/scenarios/oversell.py`. Every scenario with a bug has a
-control that differs only in the fix.
+of agents, and invariants. Each invariant has a name and says whether it
+must hold from the start and after every step, or only once every agent has
+finished. See `anyorder/scenarios/oversell.py`. Every scenario with a bug
+has a control that differs only in the fix.
 
 ## Limits
 
-* Invariants are checked only when all agents have finished.
+* A run goes on to its end after an invariant fails, and keeps only the
+  first violation.
 * A tool that raises does not end the run. Its agent gets the error's
   class name and text as the result of the call, and may ignore it. A call
   with the wrong arguments is such an error. A call to a tool the world
