@@ -1,4 +1,4 @@
-"""Finds the oversell in the naive buyer scenario and prints its trace."""
+"""Finds the oversell in the naive buyer scenario, shrinks it and prints it."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import sys
 
 from anyorder import explore
 from anyorder import scheduler
+from anyorder import shrink
 from anyorder.scenarios import oversell
 
 _SEEDS = range(100)
@@ -16,18 +17,27 @@ def _format_step(index: int, step: scheduler.Step) -> str:
     return f"  {index}. {step.agent}: {step.tool}({args}) -> {step.result!r}"
 
 
+def _print_failure(result: scheduler.RunResult) -> None:
+    print(f"  {result.violation.message}")
+    print(f"schedule: {' '.join(result.schedule)}")
+
+
 def main() -> int:
-    """Prints the first failing schedule. Returns 1 if there is one."""
+    """Prints the first failing schedule, shrunk. Returns 1 if there is one."""
     scenario = oversell.naive()
     failure = explore.explore(scenario, _SEEDS)
     if failure is None:
         print(f"{scenario.name}: no violation in {len(_SEEDS)} schedules")
         return 0
-    result = failure.result
+    found = failure.result
     print(f"{scenario.name}: violation found at seed {failure.seed}")
-    print(f"  {result.violation.message}")
-    print(f"schedule: {' '.join(result.schedule)}")
-    for index, step in enumerate(result.steps, start=1):
+    _print_failure(found)
+    shrunk = shrink.shrink(scenario, found).result
+    before, _ = shrink.size(found)
+    after, _ = shrink.size(shrunk)
+    print(f"shrunk from {before} context switches to {after}")
+    _print_failure(shrunk)
+    for index, step in enumerate(shrunk.steps, start=1):
         print(_format_step(index, step))
     return 1
 
