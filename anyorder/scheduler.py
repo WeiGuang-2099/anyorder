@@ -193,14 +193,16 @@ def run(scenario: Scenario, policy: Policy) -> RunResult:
             _advance(pending, name, agent(AgentContext(name)), None)
         while pending:
             name = policy.choose(sorted(pending))
-            coroutine, effect = pending.pop(name)
+            coroutine, effect = pending[name]
             result = _apply(world, effect)
+            # Not sooner: a refused call leaves its agent here to be closed.
+            del pending[name]
             steps.append(Step(name, effect.tool, dict(effect.args), result))
             _advance(pending, name, coroutine, result)
     finally:
-        # A refusal leaves the other agents suspended mid-call.
+        # An error leaves agents suspended mid-call.
         for coroutine, _ in pending.values():
-            coroutine.close()
+            _close(coroutine)
     return RunResult(tuple(steps), _first_violation(scenario, world))
 
 
@@ -216,11 +218,24 @@ def _advance(
     except StopIteration:
         return
     if not isinstance(effect, Effect):
-        coroutine.close()
+        _close(coroutine)
         raise UnsupportedAwaitError(
             f"agent {name!r} awaited {type(effect).__name__}; an agent may "
             "only await AgentContext.call")
     pending[name] = (coroutine, effect)
+
+
+def _close(coroutine: Coroutine[Any, Any, None]) -> None:
+    """Closes an agent that an error left suspended.
+
+    An agent can fail to close, for example by making a tool call in a
+    finally block. Its own error is dropped: the one on its way out came
+    first, and the agents after this one are still to be closed.
+    """
+    try:
+        coroutine.close()
+    except Exception:
+        pass
 
 
 def _apply(world: Any, effect: Effect) -> Any:

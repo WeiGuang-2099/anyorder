@@ -1,6 +1,9 @@
 """Checks the scheduler's ordering and its refusals."""
 
 import asyncio
+import inspect
+from collections.abc import Coroutine
+from typing import Any
 
 import pytest
 
@@ -39,6 +42,25 @@ def _scenario(**agents: scheduler.Agent) -> scheduler.Scenario:
 
 def _entries(result: scheduler.RunResult) -> list[str]:
     return [step.args["entry"] for step in result.steps]
+
+
+async def _tidier(ctx: scheduler.AgentContext) -> None:
+    """Makes a call while it is being closed, which Python refuses."""
+    try:
+        await ctx.call("record", entry=f"{ctx.name}:1")
+    finally:
+        await ctx.call("record", entry=f"{ctx.name}:tidy")
+
+
+def _kept(
+    agent: scheduler.Agent, coroutines: dict[str, Coroutine[Any, Any, None]]
+) -> scheduler.Agent:
+    """Wraps an agent so that a test can look at its coroutine afterwards."""
+    def start(ctx: scheduler.AgentContext) -> Coroutine[Any, Any, None]:
+        coroutines[ctx.name] = agent(ctx)
+        return coroutines[ctx.name]
+
+    return start
 
 
 def test_same_seed_gives_same_trace():
@@ -107,6 +129,83 @@ def test_private_method_is_not_a_tool():
 def test_agent_may_only_await_tool_calls():
     async def sleeper(ctx: scheduler.AgentContext) -> None:
         await asyncio.sleep(0)
+
+    with pytest.raises(scheduler.UnsupportedAwaitError, match="'a'"):
+        scheduler.run(_scenario(a=sleeper), scheduler.RandomPolicy(0))
+
+
+def test_refused_call_closes_every_agent():
+    async def lost(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("missing")
+
+    coroutines = {}
+    scenario = _scenario(
+        a=_kept(lost, coroutines), b=_kept(_writer, coroutines))
+    with pytest.raises(scheduler.UnknownToolError):
+        scheduler.run(scenario, scheduler.ReplayPolicy(["a"]))
+    # The agent whose call was refused too, not only the one left waiting.
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "b": inspect.CORO_CLOSED}
+
+
+def test_unsupported_await_closes_its_agent():
+    async def sleeper(ctx: scheduler.AgentContext) -> None:
+        await asyncio.sleep(0)
+
+    coroutines = {}
+    with pytest.raises(scheduler.UnsupportedAwaitError):
+        scheduler.run(
+            _scenario(a=_kept(sleeper, coroutines)), scheduler.RandomPolicy(0))
+    assert inspect.getcoroutinestate(coroutines["a"]) == inspect.CORO_CLOSED
+
+
+def test_refusal_survives_an_agent_that_raises_while_closing():
+    async def lost(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("missing")
+
+    async def sore(ctx: scheduler.AgentContext) -> None:
+        try:
+            await ctx.call("record", entry="b:1")
+        finally:
+            raise OSError("will not close")
+
+    coroutines = {}
+    scenario = _scenario(a=lost, b=sore, c=_kept(_writer, coroutines))
+    # Any error of the agent's own is dropped, not only Python's complaint
+    # about a call made while closing.
+    with pytest.raises(scheduler.UnknownToolError, match="'missing'"):
+        scheduler.run(scenario, scheduler.ReplayPolicy(["a"]))
+    assert inspect.getcoroutinestate(coroutines["c"]) == inspect.CORO_CLOSED
+
+
+def test_refusal_survives_agents_that_call_a_tool_while_closing():
+    async def lost(ctx: scheduler.AgentContext) -> None:
+        try:
+            await ctx.call("missing")
+        finally:
+            await ctx.call("record", entry="a:tidy")
+
+    coroutines = {}
+    scenario = _scenario(a=lost, b=_tidier, c=_kept(_writer, coroutines))
+    with pytest.raises(scheduler.UnknownToolError, match="'missing'"):
+        scheduler.run(scenario, scheduler.ReplayPolicy(["a"]))
+    # The two that would not close did not keep the one after them open.
+    assert inspect.getcoroutinestate(coroutines["c"]) == inspect.CORO_CLOSED
+
+
+def test_divergence_survives_an_agent_that_calls_a_tool_while_closing():
+    with pytest.raises(scheduler.ReplayDivergenceError, match="ends after 0"):
+        scheduler.run(_scenario(a=_tidier), scheduler.ReplayPolicy([]))
+
+
+def test_unsupported_await_survives_a_tool_call_while_closing():
+    async def sleeper(ctx: scheduler.AgentContext) -> None:
+        try:
+            await asyncio.sleep(0)
+        finally:
+            await ctx.call("record", entry="a:tidy")
 
     with pytest.raises(scheduler.UnsupportedAwaitError, match="'a'"):
         scheduler.run(_scenario(a=sleeper), scheduler.RandomPolicy(0))
