@@ -1,1 +1,1 @@
-"""Schedule search and replay for multi-agent systems."""
+"""Schedule search, replay and shrinking for multi-agent systems."""

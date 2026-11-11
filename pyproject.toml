@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "anyorder"
 version = "0.0.1"
-description = "Schedule search and replay for multi-agent systems."
+description = "Schedule search, replay and shrinking for multi-agent systems."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
