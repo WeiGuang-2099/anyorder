@@ -20,6 +20,8 @@ Early. What works today:
   not tolerated.
 * Shrinking of a failing schedule toward fewer context switches, then fewer
   agents.
+* Trace files. A run is written as JSON lines, read back and replayed. A
+  file that replays to another trace than it holds is refused.
 * One example scenario, an oversell, with a control that must pass.
 
 Agents are scripted Python for now. Model calls, fault injection and
@@ -51,6 +53,34 @@ Both buyers read a stock of 1 before either writes, so both place an order.
 Run one after the other, the same two buyers sell one unit. In the shrunk
 schedule one buyer reads, the other runs to its end, and the one that read
 finishes on what it read.
+
+To keep the shrunk failure and replay it later:
+
+    python -m anyorder --save oversell.jsonl
+    python -m anyorder --replay oversell.jsonl
+
+The first prints the same and also writes the shrunk run to a trace file,
+in place of any file of that name. The second searches nothing. It runs
+the schedule the file holds, checks every step and the violation against
+the file, and prints:
+
+    oversell-naive: the file replays to the same trace
+      2 orders placed against a stock of 1: buyer-1, buyer-2
+    schedule: buyer-2 buyer-1 buyer-1 buyer-1 buyer-2 buyer-2
+      1. buyer-2: read_stock() -> 1
+      2. buyer-1: read_stock() -> 1
+      3. buyer-1: write_stock(value=0) -> None
+      4. buyer-1: place_order(buyer='buyer-1') -> None
+      5. buyer-2: write_stock(value=0) -> None
+      6. buyer-2: place_order(buyer='buyer-2') -> None
+
+A replay exits with 0 when the file replays, also when the run it holds
+broke an invariant, where the search exits with 1 on a violation. A file
+that cannot be read, is not a trace file or holds a run of another
+scenario ends it with 2. A file that replays to another trace than it
+holds ends it with an error that names a step or the violation where the
+two differ, and the run is not printed. The demo replays files of the
+naive buyer scenario as it builds it, and no other.
 
 ## How it works
 
