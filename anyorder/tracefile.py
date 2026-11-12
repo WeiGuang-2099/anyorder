@@ -1,4 +1,4 @@
-"""Reads the text of a trace file and replays the run it holds.
+"""Writes a run as the text of a trace file, reads one and replays it.
 
 A trace file is JSON lines, each an object with a kind:
 
@@ -34,7 +34,7 @@ only way from a file to a run is to replay it.
 The values are those the trace held when the run ended: an argument or a
 result that was changed after its call shows its final content.
 
-Nothing here opens a file. The caller reads the text.
+Nothing here opens a file. The caller reads and writes the text.
 """
 
 from __future__ import annotations
@@ -83,6 +83,42 @@ class Saved:
     def schedule(self) -> tuple[str, ...]:
         """The agent chosen at each step."""
         return tuple(step["agent"] for step in self.steps)
+
+
+def dumps(scenario: scheduler.Scenario, result: scheduler.RunResult) -> str:
+    """Returns the text of a trace file for a run.
+
+    The text is read back and replayed once before it is returned, so no
+    text leaves here that its own reader refuses or that did not replay
+    here. A scenario that keeps state between runs can still replay
+    differently later.
+
+    Args:
+        scenario: What the run is a run of.
+        result: The run to write. It need not have broken an invariant.
+
+    Raises:
+        TypeError: The run is not written: an argument or a result is of
+            a type a file does not hold, is nested too deep or holds an
+            integer too long for this Python to write, a name or a
+            message is not a string, or a string in the run holds a
+            surrogate. Nothing is written as the nearest thing a file
+            holds.
+        ReplayDivergenceError: The text did not replay to the same trace.
+    """
+    steps, violation = _written(result)
+    records = [
+        {
+            "kind": _OPENING,
+            "version": VERSION,
+            "scenario": _string("the scenario's name", scenario.name),
+        },
+        *({"kind": "step", **step} for step in steps),
+        {"kind": "end", "violation": violation},
+    ]
+    text = "".join(f"{json.dumps(record)}\n" for record in records)
+    replay(scenario, loads(text))
+    return text
 
 
 def loads(text: str) -> Saved:

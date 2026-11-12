@@ -1,7 +1,11 @@
-"""Checks trace files: what is read, what is refused and what replays."""
+"""Checks trace files: what is written, read, refused and replayed."""
 
+import collections
 import dataclasses
+import enum
+import itertools
 import json
+import sys
 from collections.abc import Sequence
 from typing import Any
 
@@ -723,3 +727,404 @@ def test_file_holds_a_shared_list_with_its_final_content():
     assert run.steps[0].result == ["a", "b"]
     with pytest.raises(scheduler.ReplayDivergenceError, match="step 1 is "):
         tracefile.replay(_ledger(), tracefile.loads(_ledger_file('["a"]')))
+
+
+class _Colour(enum.IntEnum):
+    RED = 1
+
+
+_Point = collections.namedtuple("_Point", "x y")
+
+
+class _Name(str):
+    pass
+
+
+class _Stack(list):
+    pass
+
+
+class _Ratio(float):
+    pass
+
+
+class _Failure(scheduler.Raised):
+    pass
+
+
+def _nested(wrap: Any, times: int) -> Any:
+    value: Any = 0
+    for _ in range(times):
+        value = wrap(value)
+    return value
+
+
+def test_shrunk_failure_is_written_as_the_file_above():
+    scenario = oversell.naive()
+    failure = explore.replay(scenario, _SHRUNK)
+    assert tracefile.dumps(scenario, failure) == _text(_LINES)
+
+
+def test_run_that_passed_is_written_with_no_violation():
+    scenario = oversell.naive()
+    serial = explore.replay(scenario, _SERIAL)
+    assert tracefile.dumps(scenario, serial) == _text(_SERIAL_LINES)
+
+
+def test_violation_is_written_with_its_step_when_that_is_not_the_last():
+    # The check of a replay writes the run as the writer does, so a wrong
+    # step would agree with itself. Only the text can tell.
+    scenario = oversell.naive(buyers=3)
+    run = explore.replay(scenario, _SHRUNK + ("buyer-3",))
+    assert tracefile.dumps(scenario, run) == _text(_THIRD_BUYER_LINES)
+
+
+@pytest.mark.parametrize(
+    "value,written", _VALUES, ids=[written for _, written in _VALUES])
+def test_value_is_written_as_the_rules_give(value, written):
+    assert tracefile.dumps(_echo(value), _said(value)) == _echo_file(written)
+
+
+def test_file_is_ascii_with_one_json_object_on_each_line():
+    value = "caf\u00e9\u2028\r\n"
+    text = tracefile.dumps(_echo(value), _said(value))
+    # A line break inside a value is written as an escape, so a line of the
+    # file is a line whatever a reader takes for a line break.
+    assert text.isascii()
+    assert text.endswith("\n")
+    assert "\r" not in text
+    assert len(text.splitlines()) == text.count("\n") == 3
+    assert all(type(json.loads(line)) is dict for line in text.splitlines())
+
+
+@pytest.mark.parametrize(
+    "scenario,schedules",
+    [
+        (oversell.naive(), 16),
+        (oversell.atomic(buyers=3), 6),
+        (oversell.naive(buyers=3), 702),
+    ],
+    ids=["naive", "control", "three-buyers"])
+def test_every_run_reads_back_and_replays_as_it_was_written(
+    scenario, schedules
+):
+    # The counts are those test_explore derives by hand. Runs that passed
+    # are written too.
+    runs = list(explore.exhaust(scenario))
+    assert len(runs) == schedules
+    for run in runs:
+        saved = tracefile.loads(tracefile.dumps(scenario, run))
+        assert saved.scenario == scenario.name
+        assert saved.schedule == run.schedule
+        assert tracefile.replay(scenario, saved) == run
+
+
+@pytest.mark.parametrize(
+    "value,kind",
+    [
+        ({1, 2}, "set"),
+        (frozenset(), "frozenset"),
+        (b"x", "bytes"),
+        (object(), "object"),
+        (float("nan"), "float"),
+        (float("inf"), "float"),
+        (_Colour.RED, "_Colour"),
+        (_Point(1, 2), "_Point"),
+        (_Name("a"), "_Name"),
+        (_Stack([1]), "_Stack"),
+        (collections.OrderedDict(), "OrderedDict"),
+        ([{"a": ({2},)}], "set"),
+        ({1: "a"}, "dict"),
+        ({_Name("a"): 1}, "dict"),
+        (_Ratio(0.5), "_Ratio"),
+        (_Failure("K", "m"), "_Failure"),
+    ])
+def test_value_the_file_cannot_hold_is_not_written(value, kind):
+    # Written as its nearest JSON value it would be written as another
+    # value is, and the file would replay against a run that is not its.
+    with pytest.raises(
+            TypeError,
+            match=f"step 1: a trace file does not hold .*, of type {kind}$"):
+        tracefile.dumps(_echo(value), _said(value))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        chr(0xD83D) + chr(0xDE00),
+        chr(0xD83D),
+        "a" + chr(0xDFFF),
+        [chr(0xDC00)],
+        {chr(0xD800): 1},
+    ],
+    ids=ascii)
+def test_string_with_a_surrogate_is_not_written(value):
+    # The first is a pair, which json writes as it writes U+1F600. The
+    # others would read back as they are, and the rule is kept simple.
+    with pytest.raises(
+            TypeError,
+            match="step 1: a trace file does not hold .*, a string with a "
+                  "surrogate$"):
+        tracefile.dumps(_echo(value), _said(value))
+
+
+def test_value_python_cannot_show_is_not_written():
+    value = _chain(5000)
+    with pytest.raises(
+            TypeError,
+            match="step 1: a trace file does not hold a value too deep to "
+                  "show, of type _Link$"):
+        tracefile.dumps(_echo(value), _said(value))
+    # A message is shown the same way, and it is not in a step.
+    scenario = scheduler.Scenario(
+        name="echo",
+        make_world=_Echo,
+        agents={},
+        invariants=(
+            scheduler.Invariant(
+                "holds", lambda world: value, every_step=False),
+        ),
+    )
+    with pytest.raises(
+            TypeError,
+            match="^a trace file does not hold a value too deep to show, "
+                  "of type _Link, as the violation's message$"):
+        tracefile.dumps(scenario, explore.replay(scenario, ()))
+
+
+def test_value_that_holds_itself_is_not_written():
+    value: list[Any] = []
+    value.append(value)
+    with pytest.raises(TypeError, match="step 1: .* nested so deep"):
+        tracefile.dumps(_echo(value), _said(value))
+
+
+@pytest.mark.parametrize(
+    "wrap,most",
+    [
+        (lambda value: [value], 98),
+        (lambda value: {"k": value}, 98),
+        (lambda value: (value,), 49),
+        (lambda value: scheduler.Raised("K", value), 49),
+    ],
+    ids=["list", "dict", "tuple", "error"])
+def test_value_is_written_as_deep_as_a_line_may_be_and_no_deeper(wrap, most):
+    # A line may be nested 100 deep. The line is one level and its args
+    # are another, which leaves 98 to an argument: 98 lists or dicts, or
+    # 49 tuples or errors, which take two levels each.
+    fits = _nested(wrap, most)
+    saved = tracefile.loads(tracefile.dumps(_echo(fits), _said(fits)))
+    assert tracefile.replay(_echo(fits), saved) == _said(fits)
+    deeper = _nested(wrap, most + 1)
+    with pytest.raises(
+            TypeError,
+            match="step 1: a trace file does not hold a value nested so "
+                  "deep: a line has at most 100 levels"):
+        tracefile.dumps(_echo(deeper), _said(deeper))
+
+
+def test_result_is_written_one_level_deeper_than_an_argument():
+    # A result is not inside args, so the line leaves it 99 levels.
+    def made(value: Any) -> scheduler.Scenario:
+        class Maker:
+            def make(self) -> Any:
+                return value
+
+        async def caller(ctx: scheduler.AgentContext) -> None:
+            await ctx.call("make")
+
+        return scheduler.Scenario(
+            name="maker", make_world=Maker, agents={"a": caller},
+            invariants=())
+
+    fits = made(_nested(lambda value: [value], 99))
+    run = explore.replay(fits, ("a",))
+    saved = tracefile.loads(tracefile.dumps(fits, run))
+    assert tracefile.replay(fits, saved) == run
+    deeper = made(_nested(lambda value: [value], 100))
+    with pytest.raises(
+            TypeError,
+            match="step 1: a trace file does not hold a value nested so "
+                  "deep: a line has at most 100 levels of lists and "
+                  "objects$"):
+        tracefile.dumps(deeper, explore.replay(deeper, ("a",)))
+
+
+@pytest.mark.parametrize(
+    "empty,most", [([], 97), ({}, 97), ((), 96)],
+    ids=["list", "dict", "tuple"])
+def test_empty_value_at_the_bottom_takes_its_levels(empty, most):
+    # An argument has 98 levels. An empty list or dict takes one and an
+    # empty tuple two, as for the reader, so 97 or 96 lists fit around it.
+    def around(lists: int) -> Any:
+        value: Any = empty
+        for _ in range(lists):
+            value = [value]
+        return value
+
+    fits = around(most)
+    saved = tracefile.loads(tracefile.dumps(_echo(fits), _said(fits)))
+    assert tracefile.replay(_echo(fits), saved) == _said(fits)
+    deeper = around(most + 1)
+    with pytest.raises(TypeError, match="step 1: .* nested so deep"):
+        tracefile.dumps(_echo(deeper), _said(deeper))
+
+
+def test_value_nested_far_too_deep_is_not_written():
+    # Deeper than Python calls: the answer is the same and still names
+    # the step.
+    deep = _nested(lambda value: [value], 5000)
+    with pytest.raises(TypeError, match="step 1: .* nested so deep"):
+        tracefile.dumps(_echo(deep), _said(deep))
+
+
+@pytest.mark.skipif(
+    not getattr(sys, "get_int_max_str_digits", lambda: 0)(),
+    reason="this Python writes an integer of any length")
+def test_integer_too_long_for_json_is_not_written():
+    value = 10 ** sys.get_int_max_str_digits()
+    with pytest.raises(TypeError, match="step 1: "):
+        tracefile.dumps(_echo(value), _said(value))
+
+
+@pytest.mark.skipif(
+    not hasattr(sys, "set_int_max_str_digits"),
+    reason="this Python writes an integer of any length")
+def test_integer_json_writes_and_cannot_read_is_not_written():
+    # With a limit this high Python checks the length of an integer only
+    # roughly when it writes one and exactly when it reads one, so json
+    # writes 10 ** 20000 and then refuses to read it.
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(20000)
+    try:
+        value = 10 ** 20000
+        with pytest.raises(TypeError, match="step 1: Exceeds the limit"):
+            tracefile.dumps(_echo(value), _said(value))
+    finally:
+        sys.set_int_max_str_digits(limit)
+
+
+def test_run_whose_message_is_not_a_string_is_not_written():
+    # A check that answers False where it means None gives a violation
+    # whose message is False. The reader refuses that line, so the writer
+    # must not write it.
+    scenario = scheduler.Scenario(
+        name="echo",
+        make_world=_Echo,
+        agents={},
+        invariants=(
+            scheduler.Invariant(
+                "holds", lambda world: False, every_step=False),
+        ),
+    )
+    run = explore.replay(scenario, ())
+    assert run.violation == scheduler.Violation("holds", False, 0)
+    with pytest.raises(
+            TypeError,
+            match="does not hold False, of type bool, as the violation's "
+                  "message"):
+        tracefile.dumps(scenario, run)
+
+
+def test_run_whose_names_are_not_strings_is_not_written():
+    async def speaker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call(_Name("say"), value=1)
+
+    def scenario(name: Any, agent: Any) -> scheduler.Scenario:
+        return scheduler.Scenario(
+            name=name, make_world=_Echo, agents={agent: speaker},
+            invariants=())
+
+    numbered = scenario("echo", 1)
+    with pytest.raises(
+            TypeError,
+            match="step 1: a trace file does not hold 1, of type int, as "
+                  "the agent's name"):
+        tracefile.dumps(numbered, explore.replay(numbered, (1,)))
+    named = scenario("echo", "a")
+    with pytest.raises(
+            TypeError,
+            match="step 1: a trace file does not hold 'say', of type "
+                  "_Name, as the tool's name"):
+        tracefile.dumps(named, explore.replay(named, ("a",)))
+    unnamed = scenario(None, "a")
+    with pytest.raises(
+            TypeError,
+            match="does not hold None, of type NoneType, as the "
+                  "scenario's name"):
+        tracefile.dumps(unnamed, _said(1))
+    split = scenario("echo", chr(0xD83D) + chr(0xDE00))
+    with pytest.raises(TypeError, match="step 1: .* with a surrogate"):
+        tracefile.dumps(split, explore.replay(split, tuple(split.agents)))
+
+
+def test_run_whose_invariant_has_no_string_for_a_name_is_not_written():
+    scenario = scheduler.Scenario(
+        name="echo",
+        make_world=_Echo,
+        agents={},
+        invariants=(
+            scheduler.Invariant(7, lambda world: "broken", every_step=False),
+        ),
+    )
+    run = explore.replay(scenario, ())
+    assert run.violation == scheduler.Violation(7, "broken", 0)
+    with pytest.raises(
+            TypeError,
+            match="does not hold 7, of type int, as the invariant's name"):
+        tracefile.dumps(scenario, run)
+
+
+def test_run_that_does_not_replay_is_not_written():
+    tickets = itertools.count()
+
+    class Counter:
+        def take(self) -> int:
+            return next(tickets)
+
+    async def taker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("take")
+
+    scenario = scheduler.Scenario(
+        name="leaky", make_world=Counter, agents={"a": taker}, invariants=())
+    run = scheduler.run(scenario, scheduler.RandomPolicy(0))
+    # The run took ticket 0, and the replay of its text takes ticket 1.
+    with pytest.raises(scheduler.ReplayDivergenceError, match="step 1 is "):
+        tracefile.dumps(scenario, run)
+
+
+def test_run_whose_result_another_run_changes_is_not_written():
+    shared: list[str] = []
+
+    class Pile:
+        """Adds to a list that outlives the run, and returns it."""
+
+        def add(self) -> list[str]:
+            shared.append("x")
+            return shared
+
+    async def adder(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("add")
+
+    scenario = scheduler.Scenario(
+        name="pile", make_world=Pile, agents={"a": adder}, invariants=())
+    run = scheduler.run(scenario, scheduler.RandomPolicy(0))
+    # The run and a replay of it hold the same list, so they compare
+    # equal whatever it holds. The text does not: written after the two
+    # runs it says two entries, and its replay gives three.
+    assert explore.replay(scenario, run.schedule) == run
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        tracefile.dumps(scenario, run)
+    assert str(caught.value) == (
+        'step 1 is {"agent": "a", "tool": "add", "args": {}, '
+        '"result": ["x", "x"]} in the file and {"agent": "a", '
+        '"tool": "add", "args": {}, "result": ["x", "x", "x"]} in the run')
+
+
+def test_run_of_another_scenario_is_not_written():
+    run = explore.replay(oversell.naive(), _SHRUNK)
+    with pytest.raises(
+            scheduler.ReplayDivergenceError, match="buyer-3 can still run"):
+        tracefile.dumps(oversell.naive(buyers=3), run)
+    with pytest.raises(scheduler.ReplayDivergenceError, match="step 1 is "):
+        tracefile.dumps(oversell.naive(stock=2), run)

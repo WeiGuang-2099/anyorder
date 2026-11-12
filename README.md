@@ -68,6 +68,13 @@ finishes on what it read.
   context switches before the invariant breaks, then fewer agents among
   the steps up to there. It moves steps of the failing schedule, runs each
   candidate, and replays the one it keeps before going on from it.
+* `tracefile.dumps` gives a run as the text of a trace file: JSON lines,
+  one that names the format, its version and the scenario, one for each
+  step with its agent, its call and the result, and one with the
+  violation. It reads the text back and replays it before it returns it.
+  `tracefile.loads` reads such a text, and `tracefile.replay` runs the
+  schedule it holds and refuses the file unless every step and the
+  violation come out as the file holds them.
 
 Seeds find schedules. The schedule is what a failure is stored and reported
 as.
@@ -109,6 +116,24 @@ has a control that differs only in the fix.
   lock, can keep a candidate from ending although the given failure ended.
 * Replaying a run checks that it gives the same trace twice. That probes
   whether a scenario is deterministic and does not prove it.
+* A trace file holds None, booleans, integers, finite floats, strings,
+  lists, tuples, dicts with string keys and tool errors. A run with any
+  other value among its arguments and results is not written. Neither is
+  one with a string that holds a surrogate, or with a value nested deeper
+  than a line of the file may be.
+* A trace file is written from the trace once the run is over, so it too
+  shows a list that changed after its call with its final content.
+* A trace file names its scenario and not what the scenario was built
+  with, such as the stock. Whoever replays it brings the scenario. The
+  replay tells a wrong one only where its run of the schedule is written
+  differently: a scenario built with other numbers that gives the same
+  trace replays the file.
+* A trace file is checked against a run of its schedule once that run is
+  over, not call by call. A scenario that is not the file's can make
+  every call of the schedule before it is refused.
+* A tool's error is kept as the text Python gives it. That text can
+  differ between versions of Python, and then a file that holds one does
+  not replay on the other version.
 * The example world is synthetic. Nothing here has been run against a real
   agent framework or a real model.
 
