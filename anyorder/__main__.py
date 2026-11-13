@@ -1,8 +1,9 @@
-"""Finds the oversell in the naive buyer scenario, shrinks it and prints it.
+"""Finds a failure of a scenario, shrinks it and prints it.
 
-With --save the shrunk failure is also written to a trace file. With
---replay nothing is searched: the run a trace file holds is replayed on
-the scenario the file names, and printed.
+The scenario is the naive buyer one unless --scenario names another. With
+--save the shrunk failure is also written to a trace file. With --replay
+nothing is searched: the run a trace file holds is replayed on the
+scenario the file names, and printed.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from anyorder.scenarios import oversell
 _SEEDS = range(100)
 # A trace file names its scenario and gives nothing else of it, so each
 # name stands for one build. The numbers are written out here: a name must
-# not come to stand for another build when a default changes.
+# not come to stand for another build when a default changes. The first
+# is the one searched when no name is given.
 _BUILDS: Mapping[str, Callable[[], scheduler.Scenario]] = {
     "oversell-naive": functools.partial(oversell.naive, stock=1, buyers=2),
     "oversell-atomic": functools.partial(oversell.atomic, stock=1, buyers=2),
@@ -52,6 +54,10 @@ def _print_steps(result: scheduler.RunResult) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m anyorder")
+    parser.add_argument(
+        "--scenario", choices=tuple(_BUILDS),
+        help="search the scenario of this name and not the first of them. "
+             "Not with --replay, whose file names its scenario")
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--save", metavar="FILE", type=pathlib.Path,
@@ -101,9 +107,10 @@ def main(argv: Sequence[str] = ()) -> int:
         argv: The command line after the program's name.
 
     Returns:
-        1 if the search found a violation and 0 if it found none. With
-        --replay, 0: the file replayed to the trace it holds, whether or
-        not that run broke an invariant.
+        1 if the search found a violation and 0 if it found none, in
+        which case --save writes no file. With --replay, 0: the file
+        replayed to the trace it holds, whether or not that run broke an
+        invariant.
 
     Raises:
         ReplayDivergenceError: The file given to --replay replays to
@@ -113,13 +120,17 @@ def main(argv: Sequence[str] = ()) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
     if arguments.replay is not None:
+        if arguments.scenario is not None:
+            parser.error(
+                "argument --scenario: not allowed with argument --replay, "
+                "whose file names its scenario")
         scenario, saved = _load(parser, arguments.replay)
         result = tracefile.replay(scenario, saved)
         print(f"{scenario.name}: the file replays to the same trace")
         _print_run(result)
         _print_steps(result)
         return 0
-    scenario = _BUILDS["oversell-naive"]()
+    scenario = _BUILDS[arguments.scenario or next(iter(_BUILDS))]()
     failure = explore.explore(scenario, _SEEDS)
     if failure is None:
         print(f"{scenario.name}: no violation in {len(_SEEDS)} schedules")

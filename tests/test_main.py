@@ -28,6 +28,14 @@ _KNOWN = [
       "editor-1")),
 ]
 _NAMES = [scenario.name for scenario, _ in _KNOWN]
+# What the search of each prints first and the status it ends with. The
+# controls end with 0.
+_SEARCHED = {
+    "oversell-naive": ("violation found at seed 4", 1),
+    "oversell-atomic": ("no violation in 100 schedules", 0),
+    "lost-update-naive": ("violation found at seed 4", 1),
+    "lost-update-cas": ("no violation in 100 schedules", 0),
+}
 
 
 def _assert_readme_shows(output: str) -> None:
@@ -54,6 +62,18 @@ def _exit_status(arguments, capsys):
     with pytest.raises(SystemExit) as ended:
         demo.main(arguments)
     return ended.value.code, capsys.readouterr()
+
+
+def _program(*arguments: str) -> subprocess.CompletedProcess:
+    """Runs the demo as a program, for five seconds at most.
+
+    A run that never ended would keep every step it made, so the limit is
+    on what the program holds as much as on the time it takes.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "anyorder", *arguments],
+        cwd=_README.parent, capture_output=True, text=True, check=False,
+        timeout=5)
 
 
 def _names_in_the_refusal(tmp_path, capsys):
@@ -263,21 +283,114 @@ def test_demo_refuses_save_together_with_replay(tmp_path, capsys):
 
 def test_demo_run_as_a_program_takes_its_command_line(tmp_path, capsys):
     path, _ = _saved_failure(tmp_path, capsys)
-    root = pathlib.Path(__file__).parent.parent
-
-    def run(*arguments: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, "-m", "anyorder", *arguments],
-            cwd=root, capture_output=True, text=True, check=False)
-
-    replayed = run("--replay", str(path))
+    replayed = _program("--replay", str(path))
     assert replayed.returncode == 0
     assert replayed.stdout.splitlines()[0] == (
         "oversell-naive: the file replays to the same trace")
-    assert run("--replay", str(tmp_path / "none.jsonl")).returncode == 2
+    assert _program("--replay", str(tmp_path / "none.jsonl")).returncode == 2
     # The search found a violation, and the program ends with what main
     # returned.
-    assert run().returncode == 1
+    assert _program().returncode == 1
+
+
+@pytest.mark.parametrize("name", _NAMES)
+def test_demo_run_as_a_program_searches_the_scenario_that_is_named(name):
+    # As a program, which can be cut: the control of the lost update tries
+    # a refused write again, and a search of a control that never ended
+    # would hang a test that made it here.
+    message, status = _SEARCHED[name]
+    searched = _program("--scenario", name)
+    # With what the program wrote as an error, should it print nothing.
+    assert searched.stdout.splitlines()[:1] == [f"{name}: {message}"], (
+        searched.stderr)
+    assert searched.returncode == status
+
+
+def test_demo_searches_the_lost_update_and_prints_its_shrunk_failure(capsys):
+    assert demo.main(["--scenario", "lost-update-naive"]) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        "lost-update-naive: violation found at seed 4",
+        "  the document held editor-1 and now holds only editor-2",
+        "schedule: editor-1 editor-2 editor-1 editor-2",
+        "shrunk from 3 context switches to 2",
+        "  the document held editor-1 and now holds only editor-2",
+        "schedule: editor-2 editor-1 editor-1 editor-2",
+        "  1. editor-2: read() -> (0, ())",
+        "  2. editor-1: read() -> (0, ())",
+        "  3. editor-1: write(lines=('editor-1',)) -> None",
+        "  4. editor-2: write(lines=('editor-2',)) -> None",
+    ]
+
+
+def test_demo_without_a_name_searches_the_first_scenario_it_knows(capsys):
+    assert demo.main() == 1
+    plain = capsys.readouterr().out
+    assert demo.main(["--scenario", _NAMES[0]]) == 1
+    assert capsys.readouterr().out == plain
+
+
+def test_demo_saves_and_replays_a_failure_of_the_scenario_that_is_named(
+    tmp_path, capsys
+):
+    path = tmp_path / "lost.jsonl"
+    arguments = ["--scenario", "lost-update-naive", "--save", str(path)]
+    assert demo.main(arguments) == 1
+    searched = capsys.readouterr().out
+    assert tracefile.loads(
+        path.read_text(encoding="utf-8")).scenario == "lost-update-naive"
+    # The file names its scenario, so the replay is given no name.
+    assert demo.main(["--replay", str(path)]) == 0
+    replayed = capsys.readouterr().out.splitlines()
+    assert replayed[0] == (
+        "lost-update-naive: the file replays to the same trace")
+    assert replayed[1:] == searched.splitlines()[-6:]
+
+
+def test_demo_with_save_writes_no_file_when_the_search_finds_nothing(
+    tmp_path, capsys
+):
+    path, _ = _saved_failure(tmp_path, capsys)
+    older = path.read_bytes()
+    arguments = ["--scenario", "oversell-atomic", "--save", str(path)]
+    assert demo.main(arguments) == 0
+    assert capsys.readouterr().out == (
+        "oversell-atomic: no violation in 100 schedules\n")
+    # A file of that name is left as it was, and none is made.
+    assert path.read_bytes() == older
+    other = tmp_path / "other.jsonl"
+    arguments[-1] = str(other)
+    assert demo.main(arguments) == 0
+    assert not other.exists()
+
+
+def test_demo_refuses_a_scenario_it_does_not_know(capsys):
+    status, printed = _exit_status(["--scenario", "oversell"], capsys)
+    assert status == 2
+    assert printed.out == ""
+    assert "argument --scenario: invalid choice: 'oversell'" in printed.err
+    # The names it knows follow, in the order of the README's list. Their
+    # places are compared: some versions of Python put each in quotes.
+    places = [printed.err.rindex(name) for name in _NAMES]
+    assert places == sorted(places)
+
+
+@pytest.mark.parametrize("saved", [True, False], ids=["good", "missing"])
+def test_demo_refuses_a_scenario_together_with_replay(
+    saved, tmp_path, capsys
+):
+    # With a good file of that very scenario only the two flags together
+    # can be what ends the demo. With no file at all the refusal is still
+    # of the flags: it comes before the file is looked at.
+    path = tmp_path / "none.jsonl"
+    if saved:
+        path, _ = _saved_failure(tmp_path, capsys)
+    status, printed = _exit_status(
+        ["--scenario", "oversell-naive", "--replay", str(path)], capsys)
+    assert status == 2
+    assert printed.out == ""
+    assert (
+        "error: argument --scenario: not allowed with argument --replay, "
+        "whose file names its scenario") in printed.err
 
 
 def test_demo_refuses_an_argument_it_does_not_know(capsys):

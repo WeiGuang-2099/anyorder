@@ -99,6 +99,15 @@ built with other numbers is replayed on the build above, and where its run
 differs it ends the demo with the error of a file that replays to another
 trace.
 
+The search runs the first of them. To search another, name it:
+
+    python -m anyorder --scenario lost-update-naive
+
+The search of a control finds no violation and exits with 0. `--save`
+then writes no file, and a file of that name is left as it was.
+`--scenario` is not taken together with `--replay`, whose file names its
+scenario.
+
 ## How it works
 
 * An agent reaches its world only through `AgentContext.call`. Each call
