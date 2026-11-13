@@ -25,7 +25,8 @@ Early. What works today:
 * A serial-equivalence oracle. A run fails when it leaves its world in a
   state that no serial order of the agents leaves, whether or not it broke
   an invariant.
-* One example scenario, an oversell, with a control that must pass.
+* Example scenarios, an oversell and a lost update, each with a control
+  that must pass.
 
 Agents are scripted Python for now. Model calls, fault injection and
 adapters for agent frameworks are not built yet.
@@ -124,15 +125,30 @@ as.
 A scenario is a world (any object whose public methods are the tools), a set
 of agents, and invariants. Each invariant has a name and says whether it
 must hold from the start and after every step, or only once every agent has
-finished. See `anyorder/scenarios/oversell.py`. Every scenario with a bug
-has a control that differs only in the fix.
+finished. Every scenario with a bug has a control that differs only in the
+fix. The examples are in `anyorder/scenarios`:
+
+* `oversell.py`: buyers of limited stock. The naive buyer reads the stock
+  and writes it back one lower in separate calls, so two buyers can both
+  take the last unit. The control checks and decrements in one call.
+* `lost_update.py`: editors that each add a line to one document. The
+  naive editor reads the lines and writes them back with its own, so when
+  two read the same lines the second write drops the line of the first.
+  The control writes with a compare-and-set on the version it read, and
+  reads again when that write is refused.
+
+An invariant's check is asked about the world alone. One that kept a
+memory of its own would carry it from one run into the next, and a replay
+could then come out otherwise. A rule about the past needs a world that
+keeps that past: the document of the lost update keeps every line it has
+held, so that its invariant can ask whether one of them is gone.
 
 For the serial-equivalence oracle a scenario also needs a snapshot
-function, such as `oversell.snapshot`, which is given to
-`oracle.serial_outcomes` with the scenario. It gives the state of a world
-as a value that can be hashed and that is equal for two worlds in the same
-state, such as a tuple of numbers and strings, and so says what counts as
-ending the same.
+function, such as `oversell.snapshot` or `lost_update.snapshot`, which is
+given to `oracle.serial_outcomes` with the scenario. It gives the state of
+a world as a value that can be hashed and that is equal for two worlds in
+the same state, such as a tuple of numbers and strings, and so says what
+counts as ending the same.
 
 ## Limits
 
@@ -150,10 +166,11 @@ ending the same.
   schedules.
 * Shrinking ends at a failure that none of its moves makes smaller. That
   is not always the smallest one. The tests compare it with exhaustive
-  search: for the sizes of the oversell scenario they cover, it reaches
-  the smallest failure from every failing schedule, and they hold small
-  scenarios where it ends above the smallest. A candidate that breaks
-  another invariant before the one being shrunk is passed over.
+  search: for the sizes of the oversell and of the lost update that they
+  cover, it reaches the smallest failure from every failing schedule, and
+  they hold small scenarios where it ends above the smallest. A candidate
+  that breaks another invariant before the one being shrunk is passed
+  over.
 * Exhaustive search has no bound. Every agent must finish under every
   schedule, and the number of schedules can grow exponentially with the
   number of calls and factorially with the number of agents.
@@ -161,6 +178,17 @@ ending the same.
   candidate. Once a candidate's order runs out, the first waiting agent by
   name runs, so an agent that waits for another by trying again, as for a
   lock, can keep a candidate from ending although the given failure ended.
+* The control of the lost update tries again after a refused write, and
+  still ends under every schedule: it reads again first, a write is
+  refused only when another editor's went through since the read, and each
+  editor's goes through once. An editor that made the same refused call
+  again would never end, and nothing here would cut its run.
+* The invariant of the lost update, that no line the document once held is
+  gone, knows a line by its text. It is a rule for editors that only add
+  lines, each a line of its own: two that add the same text can lose an
+  update that it does not see. Nor does it see an editor that stops after
+  a refused write, which loses no line and never adds its own. The
+  serial-equivalence oracle sees both.
 * The serial-equivalence oracle compares the state a run leaves and
   nothing else. What an agent read or was told is not compared, so a read
   that no serial order gives is seen only where a tool call wrote what
@@ -191,8 +219,8 @@ ending the same.
 * A tool's error is kept as the text Python gives it. That text can
   differ between versions of Python, and then a file that holds one does
   not replay on the other version.
-* The example world is synthetic. Nothing here has been run against a real
-  agent framework or a real model.
+* The example worlds are synthetic. Nothing here has been run against a
+  real agent framework or a real model.
 
 ## License
 
