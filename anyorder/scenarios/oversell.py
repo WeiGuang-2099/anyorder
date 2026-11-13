@@ -60,6 +60,11 @@ def no_oversell(inventory: Inventory) -> str | None:
         f"{inventory.initial_stock}: {', '.join(inventory.orders)}")
 
 
+def snapshot(inventory: Inventory) -> tuple[int, tuple[str, ...]]:
+    """Gives the state a run leaves: the stock and the orders as placed."""
+    return inventory.stock, tuple(inventory.orders)
+
+
 def naive(stock: int = 1, buyers: int = 2) -> scheduler.Scenario:
     """Buyers that check and decrement in separate calls."""
     return _scenario("oversell-naive", naive_buyer, stock, buyers)
