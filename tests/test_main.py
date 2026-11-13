@@ -10,9 +10,24 @@ from anyorder import __main__ as demo
 from anyorder import explore
 from anyorder import scheduler
 from anyorder import tracefile
+from anyorder.scenarios import lost_update
 from anyorder.scenarios import oversell
 
 _README = pathlib.Path(__file__).parent.parent / "README.md"
+# Each scenario the demo knows by name, as the README says it is built,
+# with a schedule of it. The numbers are written out: a name must not
+# come to stand for another build when a default changes.
+_KNOWN = [
+    (oversell.naive(stock=1, buyers=2),
+     ("buyer-1", "buyer-2", "buyer-1", "buyer-1", "buyer-2", "buyer-2")),
+    (oversell.atomic(stock=1, buyers=2), ("buyer-2", "buyer-1")),
+    (lost_update.naive(editors=2),
+     ("editor-1", "editor-2", "editor-1", "editor-2")),
+    (lost_update.cas(editors=2),
+     ("editor-1", "editor-2", "editor-2", "editor-1", "editor-1",
+      "editor-1")),
+]
+_NAMES = [scenario.name for scenario, _ in _KNOWN]
 
 
 def _assert_readme_shows(output: str) -> None:
@@ -22,7 +37,8 @@ def _assert_readme_shows(output: str) -> None:
     start = readme.index(printed[0])
     end = start + len(printed)
     assert readme[start:end] == printed
-    # The block ends where the output ends.
+    # The block starts where the output starts and ends where it ends.
+    assert not readme[start - 1].startswith("    ")
     assert not readme[end].startswith("    ")
 
 
@@ -38,6 +54,18 @@ def _exit_status(arguments, capsys):
     with pytest.raises(SystemExit) as ended:
         demo.main(arguments)
     return ended.value.code, capsys.readouterr()
+
+
+def _names_in_the_refusal(tmp_path, capsys):
+    """Returns the scenarios the demo names when a file has none of them."""
+    path = tmp_path / "unknown.jsonl"
+    path.write_text(
+        '{"kind": "anyorder-trace", "version": 1, "scenario": "unknown"}\n'
+        '{"kind": "end", "violation": null}\n', encoding="utf-8")
+    status, printed = _exit_status(["--replay", str(path)], capsys)
+    assert status == 2
+    _, _, names = printed.err.strip().rpartition("It knows ")
+    return names.split(", ")
 
 
 def test_demo_prints_the_trace_in_the_readme(capsys):
@@ -94,7 +122,7 @@ def test_demo_replays_a_file_with_other_line_ends(tmp_path, capsys):
 
 
 def test_demo_replay_of_a_run_that_passed_returns_0(tmp_path, capsys):
-    scenario = oversell.naive()
+    scenario = oversell.naive(stock=1, buyers=2)
     serial = explore.replay(
         scenario, ("buyer-1", "buyer-1", "buyer-1", "buyer-2"))
     path = tmp_path / "serial.jsonl"
@@ -158,18 +186,58 @@ def test_demo_exits_with_2_on_a_file_that_is_missing(tmp_path, capsys):
     assert f"error: {missing}: " in printed.err
 
 
-def test_demo_exits_with_2_on_a_file_of_another_scenario(tmp_path, capsys):
-    scenario = oversell.atomic()
-    run = explore.replay(scenario, ("buyer-1", "buyer-2"))
-    path = tmp_path / "control.jsonl"
+@pytest.mark.parametrize("scenario,schedule", _KNOWN, ids=_NAMES)
+def test_demo_replays_a_file_on_the_scenario_it_names(
+    scenario, schedule, tmp_path, capsys
+):
+    run = explore.replay(scenario, schedule)
+    path = tmp_path / "run.jsonl"
     path.write_text(tracefile.dumps(scenario, run), encoding="utf-8")
+    assert demo.main(["--replay", str(path)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == (
+        f"{scenario.name}: the file replays to the same trace")
+
+
+def test_demo_knows_the_scenarios_the_readme_lists(tmp_path, capsys):
+    known = _names_in_the_refusal(tmp_path, capsys)
+    assert known == _NAMES
+    _assert_readme_shows("\n".join(known))
+
+
+def test_demo_exits_with_2_on_a_file_of_a_scenario_it_does_not_know(
+    tmp_path, capsys
+):
+    path, _ = _saved_failure(tmp_path, capsys)
+    text = path.read_text(encoding="utf-8")
+    assert text.count('"oversell-naive"') == 1
+    path.write_text(
+        text.replace('"oversell-naive"', '"oversell-other"'),
+        encoding="utf-8")
     status, printed = _exit_status(["--replay", str(path)], capsys)
     assert status == 2
     assert printed.out == ""
     assert f"error: {path}: " in printed.err
     assert (
-        "the file holds a run of 'oversell-atomic', and the demo replays "
-        "'oversell-naive'") in printed.err
+        "the file holds a run of 'oversell-other', which the demo does not "
+        "know. It knows oversell-naive, oversell-atomic, lost-update-naive, "
+        "lost-update-cas") in printed.err
+
+
+def test_demo_does_not_replay_a_file_of_a_scenario_built_otherwise(
+    tmp_path, capsys
+):
+    # The file names the naive buyer scenario, and its run is of two
+    # units. The demo brings the build it knows by that name, of one unit,
+    # where the second buyer reads 0 and stops.
+    scenario = oversell.naive(stock=2, buyers=2)
+    run = explore.replay(scenario, ("buyer-1",) * 3 + ("buyer-2",) * 3)
+    path = tmp_path / "two-units.jsonl"
+    path.write_text(tracefile.dumps(scenario, run), encoding="utf-8")
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="the run ended after 4 steps but the schedule has 6"):
+        demo.main(["--replay", str(path)])
+    assert capsys.readouterr().out == ""
 
 
 def test_demo_exits_with_2_when_the_file_cannot_be_written(tmp_path, capsys):

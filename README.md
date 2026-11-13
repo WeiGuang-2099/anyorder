@@ -80,11 +80,24 @@ the file, and prints:
 
 A replay exits with 0 when the file replays, also when the run it holds
 broke an invariant, where the search exits with 1 on a violation. A file
-that cannot be read, is not a trace file or holds a run of another
-scenario ends it with 2. A file that replays to another trace than it
-holds ends it with an error that names a step or the violation where the
-two differ, and the run is not printed. The demo replays files of the
-naive buyer scenario as it builds it, and no other.
+that cannot be read, is not a trace file or names a scenario the demo does
+not know ends it with 2. A file that replays to another trace than it
+holds ends it with an error that says where the two differ, at a step, at
+the violation or in the number of steps, and the run is not printed.
+
+A replay runs the scenario the file names. The demo knows these by name:
+
+    oversell-naive
+    oversell-atomic
+    lost-update-naive
+    lost-update-cas
+
+It builds the first two with a stock of 1 and 2 buyers and the last two
+with 2 editors. `oversell-atomic` and `lost-update-cas` are the controls.
+A file names its scenario and nothing else of it. A file of a scenario
+built with other numbers is replayed on the build above, and where its run
+differs it ends the demo with the error of a file that replays to another
+trace.
 
 ## How it works
 
@@ -209,10 +222,11 @@ counts as ending the same.
 * A trace file is written from the trace once the run is over, so it too
   shows a list that changed after its call with its final content.
 * A trace file names its scenario and not what the scenario was built
-  with, such as the stock. Whoever replays it brings the scenario. The
-  replay tells a wrong one only where its run of the schedule is written
-  differently: a scenario built with other numbers that gives the same
-  trace replays the file.
+  with, such as the stock or the number of editors. Whoever replays it
+  brings the scenario, and the demo brings the build it knows by that
+  name. The replay tells a wrong one only where its run of the schedule is
+  written differently: a scenario built with other numbers that gives the
+  same trace replays the file.
 * A trace file is checked against a run of its schedule once that run is
   over, not call by call. A scenario that is not the file's can make
   every call of the schedule before it is refused.

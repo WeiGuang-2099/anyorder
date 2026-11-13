@@ -1,24 +1,35 @@
 """Finds the oversell in the naive buyer scenario, shrinks it and prints it.
 
 With --save the shrunk failure is also written to a trace file. With
---replay nothing is searched: the run a trace file holds is replayed and
-printed.
+--replay nothing is searched: the run a trace file holds is replayed on
+the scenario the file names, and printed.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import pathlib
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from anyorder import explore
 from anyorder import scheduler
 from anyorder import shrink
 from anyorder import tracefile
+from anyorder.scenarios import lost_update
 from anyorder.scenarios import oversell
 
 _SEEDS = range(100)
+# A trace file names its scenario and gives nothing else of it, so each
+# name stands for one build. The numbers are written out here: a name must
+# not come to stand for another build when a default changes.
+_BUILDS: Mapping[str, Callable[[], scheduler.Scenario]] = {
+    "oversell-naive": functools.partial(oversell.naive, stock=1, buyers=2),
+    "oversell-atomic": functools.partial(oversell.atomic, stock=1, buyers=2),
+    "lost-update-naive": functools.partial(lost_update.naive, editors=2),
+    "lost-update-cas": functools.partial(lost_update.cas, editors=2),
+}
 
 
 def _format_step(index: int, step: scheduler.Step) -> str:
@@ -47,28 +58,29 @@ def _parser() -> argparse.ArgumentParser:
         help="also write the shrunk failure to FILE as a trace file")
     group.add_argument(
         "--replay", metavar="FILE", type=pathlib.Path,
-        help="search nothing: replay the run the trace file FILE holds")
+        help="search nothing: replay the run the trace file FILE holds, on "
+             "the scenario the file names")
     return parser
 
 
 def _load(
-    parser: argparse.ArgumentParser, path: pathlib.Path, name: str
-) -> tracefile.Saved:
-    """Reads a trace file of the scenario with this name.
+    parser: argparse.ArgumentParser, path: pathlib.Path
+) -> tuple[scheduler.Scenario, tracefile.Saved]:
+    """Reads a trace file and builds the scenario it names.
 
-    A file that cannot be read, is not a trace file or holds a run of
-    another scenario ends the demo with status 2.
+    A file that cannot be read, is not a trace file or names a scenario
+    the demo does not know ends the demo with status 2.
     """
     try:
         # As bytes: a text file read as text may have its line ends changed.
         saved = tracefile.loads(path.read_bytes().decode("utf-8"))
     except (OSError, ValueError) as error:
         parser.error(f"{path}: {error}")
-    if saved.scenario != name:
+    if saved.scenario not in _BUILDS:
         parser.error(
-            f"{path}: the file holds a run of {saved.scenario!r}, and the "
-            f"demo replays {name!r}")
-    return saved
+            f"{path}: the file holds a run of {saved.scenario!r}, which the "
+            f"demo does not know. It knows {', '.join(_BUILDS)}")
+    return _BUILDS[saved.scenario](), saved
 
 
 def _save(
@@ -100,14 +112,14 @@ def main(argv: Sequence[str] = ()) -> int:
     """
     parser = _parser()
     arguments = parser.parse_args(argv)
-    scenario = oversell.naive()
     if arguments.replay is not None:
-        saved = _load(parser, arguments.replay, scenario.name)
+        scenario, saved = _load(parser, arguments.replay)
         result = tracefile.replay(scenario, saved)
         print(f"{scenario.name}: the file replays to the same trace")
         _print_run(result)
         _print_steps(result)
         return 0
+    scenario = _BUILDS["oversell-naive"]()
     failure = explore.explore(scenario, _SEEDS)
     if failure is None:
         print(f"{scenario.name}: no violation in {len(_SEEDS)} schedules")
