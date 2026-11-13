@@ -22,6 +22,9 @@ Early. What works today:
   agents.
 * Trace files. A run is written as JSON lines, read back and replayed. A
   file that replays to another trace than it holds is refused.
+* A serial-equivalence oracle. A run fails when it leaves its world in a
+  state that no serial order of the agents leaves, whether or not it broke
+  an invariant.
 * One example scenario, an oversell, with a control that must pass.
 
 Agents are scripted Python for now. Model calls, fault injection and
@@ -105,6 +108,13 @@ naive buyer scenario as it builds it, and no other.
   `tracefile.loads` reads such a text, and `tracefile.replay` runs the
   schedule it holds and refuses the file unless every step and the
   violation come out as the file holds them.
+* `oracle.serial_outcomes` runs every serial order of a scenario's agents,
+  each agent making all its calls before the next makes one, and keeps the
+  state each order leaves its world in, as a snapshot function gives it.
+  `oracle.judge` takes those outcomes and a run. It replays the run to
+  look at its world and names the serial orders that end in the same
+  state. With none the run failed, and it is replayed once more before
+  that is reported: both replays must end in the same state.
 
 Seeds find schedules. The schedule is what a failure is stored and reported
 as.
@@ -116,6 +126,13 @@ of agents, and invariants. Each invariant has a name and says whether it
 must hold from the start and after every step, or only once every agent has
 finished. See `anyorder/scenarios/oversell.py`. Every scenario with a bug
 has a control that differs only in the fix.
+
+For the serial-equivalence oracle a scenario also needs a snapshot
+function, such as `oversell.snapshot`, which is given to
+`oracle.serial_outcomes` with the scenario. It gives the state of a world
+as a value that can be hashed and that is equal for two worlds in the same
+state, such as a tuple of numbers and strings, and so says what counts as
+ending the same.
 
 ## Limits
 
@@ -144,6 +161,16 @@ has a control that differs only in the fix.
   candidate. Once a candidate's order runs out, the first waiting agent by
   name runs, so an agent that waits for another by trying again, as for a
   lock, can keep a candidate from ending although the given failure ended.
+* The serial-equivalence oracle compares the state a run leaves and
+  nothing else. What an agent read or was told is not compared, so a read
+  that no serial order gives is seen only where a tool call wrote what
+  came of it to the world. A failure that the serial orders share is not
+  seen at all: that takes an invariant.
+* A failure that only the oracle sees is reported as it was found.
+  `shrink.shrink` takes a run that broke an invariant, and
+  `explore.explore` and the demo search for one. The oracle has no bound
+  either: it runs the n! serial orders of n agents, each twice, and every
+  agent must finish in each of them.
 * Replaying a run checks that it gives the same trace twice. That probes
   whether a scenario is deterministic and does not prove it.
 * A trace file holds None, booleans, integers, finite floats, strings,
