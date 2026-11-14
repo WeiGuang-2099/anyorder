@@ -7,6 +7,7 @@ import pytest
 
 from anyorder.scenarios import lost_update
 from anyorder.scenarios import oversell
+from anyorder.scenarios import write_skew
 
 
 @pytest.mark.parametrize("scenario,control", [
@@ -14,8 +15,11 @@ from anyorder.scenarios import oversell
     (oversell.naive(stock=2, buyers=3), oversell.atomic(stock=2, buyers=3)),
     (lost_update.naive(), lost_update.cas()),
     (lost_update.naive(editors=3), lost_update.cas(editors=3)),
+    (write_skew.naive(), write_skew.atomic()),
+    (write_skew.cas(doctors=3), write_skew.atomic(doctors=3)),
 ], ids=["oversell", "oversell-of-two-units", "lost-update",
-        "lost-update-of-three"])
+        "lost-update-of-three", "write-skew",
+        "write-skew-fix-that-fails-of-three"])
 def test_control_differs_from_its_scenario_only_in_the_agent(
         scenario, control):
     # Every scenario with a bug has a control that differs only in the
