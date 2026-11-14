@@ -25,8 +25,9 @@ Early. What works today:
 * A serial-equivalence oracle. A run fails when it leaves its world in a
   state that no serial order of the agents leaves, whether or not it broke
   an invariant.
-* Example scenarios, an oversell and a lost update, each with a control
-  that must pass.
+* Example scenarios, an oversell, a lost update and a write skew, each
+  with a control that must pass. The write skew also has a fix that must
+  fail.
 
 Agents are scripted Python for now. Model calls, fault injection and
 adapters for agent frameworks are not built yet.
@@ -158,6 +159,13 @@ fix. The examples are in `anyorder/scenarios`:
   two read the same lines the second write drops the line of the first.
   The control writes with a compare-and-set on the version it read, and
   reads again when that write is refused.
+* `write_skew.py`: doctors on a rota, where one must stay on call. The
+  naive doctor reads the rota and, if another doctor is on call, takes
+  itself off call in a second call, so two doctors can each see the other
+  on call and both leave. A compare-and-set on the doctor's own entry is a
+  fix that fails: the doctors write different entries, so no write is
+  refused. The control looks at the other entries and writes its own in
+  one call.
 
 An invariant's check is asked about the world alone. One that kept a
 memory of its own would carry it from one run into the next, and a replay
@@ -189,11 +197,10 @@ counts as ending the same.
   schedules.
 * Shrinking ends at a failure that none of its moves makes smaller. That
   is not always the smallest one. The tests compare it with exhaustive
-  search: for the sizes of the oversell and of the lost update that they
-  cover, it reaches the smallest failure from every failing schedule, and
-  they hold small scenarios where it ends above the smallest. A candidate
-  that breaks another invariant before the one being shrunk is passed
-  over.
+  search: for the sizes of the three examples that they cover, it reaches
+  the smallest failure from every failing schedule, and they hold small
+  scenarios where it ends above the smallest. A candidate that breaks
+  another invariant before the one being shrunk is passed over.
 * Exhaustive search has no bound. Every agent must finish under every
   schedule, and the number of schedules can grow exponentially with the
   number of calls and factorially with the number of agents.
@@ -214,6 +221,16 @@ counts as ending the same.
   update that it does not see. Nor does it see an editor that stops after
   a refused write, which loses no line and never adds its own. The
   serial-equivalence oracle sees both.
+* The write skew reads the whole rota in one call, so it does not show a
+  doctor that reads the entries one at a time. No compare-and-set is
+  refused in it, so what its compare-and-set doctor does after a refusal
+  is seen only in tests, on rotas that somebody else writes. Like the
+  control of the lost update, that doctor, when it may leave, would ask
+  again without end on a rota whose compare-and-set raised every time.
+  The control of the write skew passes the serial-equivalence oracle
+  whatever its tool does: each of its doctors makes one call, so every
+  schedule is a serial order. What it does is checked by a test that
+  counts the doctors that leave.
 * The serial-equivalence oracle compares the state a run leaves and
   nothing else. What an agent read or was told is not compared, so a read
   that no serial order gives is seen only where a tool call wrote what
