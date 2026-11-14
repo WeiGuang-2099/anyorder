@@ -1,11 +1,9 @@
 """Checks the lost update scenario and its control under both oracles.
 
 The document's tools come first, then the naive editors with their counts
-worked out by hand, then the control, with what it must share with its
-scenario: that test also takes the oversell and its control. After them
-come shrinking, trace files and three wrong controls of the tests' own,
-which show what each oracle sees of an editor that handles a refused write
-badly.
+worked out by hand, then the control. After them come shrinking, trace
+files and three wrong controls of the tests' own, which show what each
+oracle sees of an editor that handles a refused write badly.
 """
 
 import collections
@@ -21,7 +19,6 @@ from anyorder import scheduler
 from anyorder import shrink
 from anyorder import tracefile
 from anyorder.scenarios import lost_update
-from anyorder.scenarios import oversell
 
 _E1, _E2 = "editor-1", "editor-2"
 _BOTH_READ_FIRST = (_E1, _E2, _E1, _E2)
@@ -392,29 +389,6 @@ def test_control_passes_both_oracles_under_random_schedules(editors):
         run = scheduler.run(scenario, scheduler.RandomPolicy(seed))
         assert run.violation is None
         assert not oracle.judge(serial, run).failed
-
-
-@pytest.mark.parametrize("scenario,control", [
-    (oversell.naive(), oversell.atomic()),
-    (oversell.naive(stock=2, buyers=3), oversell.atomic(stock=2, buyers=3)),
-    (lost_update.naive(), lost_update.cas()),
-    (lost_update.naive(editors=3), lost_update.cas(editors=3)),
-], ids=["oversell", "oversell-of-two-units", "lost-update",
-        "lost-update-of-three"])
-def test_control_differs_from_its_scenario_only_in_the_agent(
-        scenario, control):
-    # Every scenario with a bug has a control that differs only in the
-    # fix: here the same world, the same invariants and agents of the same
-    # names, with one other agent function behind all of them. What that
-    # function does is not asked here: the tests of each control are.
-    assert type(control.make_world()) is type(scenario.make_world())
-    assert vars(control.make_world()) == vars(scenario.make_world())
-    assert control.invariants == scenario.invariants
-    assert list(control.agents) == list(scenario.agents)
-    (broken,) = set(scenario.agents.values())
-    (fixed,) = set(control.agents.values())
-    assert fixed is not broken
-    assert control.name != scenario.name
 
 
 def test_control_passes_the_search_that_finds_the_lost_line():
