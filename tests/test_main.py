@@ -12,6 +12,7 @@ from anyorder import scheduler
 from anyorder import tracefile
 from anyorder.scenarios import lost_update
 from anyorder.scenarios import oversell
+from anyorder.scenarios import write_skew
 
 _README = pathlib.Path(__file__).parent.parent / "README.md"
 # Each scenario the demo knows by name, as the README says it is built,
@@ -26,15 +27,23 @@ _KNOWN = [
     (lost_update.cas(editors=2),
      ("editor-1", "editor-2", "editor-2", "editor-1", "editor-1",
       "editor-1")),
+    (write_skew.naive(doctors=2),
+     ("doctor-1", "doctor-2", "doctor-1", "doctor-2")),
+    (write_skew.cas(doctors=2),
+     ("doctor-2", "doctor-1", "doctor-1", "doctor-2")),
+    (write_skew.atomic(doctors=2), ("doctor-2", "doctor-1")),
 ]
 _NAMES = [scenario.name for scenario, _ in _KNOWN]
 # What the search of each prints first and the status it ends with. The
-# controls end with 0.
+# controls end with 0, and the fix that fails with 1.
 _SEARCHED = {
     "oversell-naive": ("violation found at seed 4", 1),
     "oversell-atomic": ("no violation in 100 schedules", 0),
     "lost-update-naive": ("violation found at seed 4", 1),
     "lost-update-cas": ("no violation in 100 schedules", 0),
+    "write-skew-naive": ("violation found at seed 4", 1),
+    "write-skew-cas": ("violation found at seed 4", 1),
+    "write-skew-atomic": ("no violation in 100 schedules", 0),
 }
 
 
@@ -236,11 +245,12 @@ def test_demo_exits_with_2_on_a_file_of_a_scenario_it_does_not_know(
     status, printed = _exit_status(["--replay", str(path)], capsys)
     assert status == 2
     assert printed.out == ""
-    assert f"error: {path}: " in printed.err
-    assert (
-        "the file holds a run of 'oversell-other', which the demo does not "
-        "know. It knows oversell-naive, oversell-atomic, lost-update-naive, "
-        "lost-update-cas") in printed.err
+    # The message to its end: no name follows the last of these.
+    assert printed.err.endswith(
+        f"error: {path}: the file holds a run of 'oversell-other', which "
+        "the demo does not know. It knows oversell-naive, oversell-atomic, "
+        "lost-update-naive, lost-update-cas, write-skew-naive, "
+        "write-skew-cas, write-skew-atomic\n")
 
 
 def test_demo_does_not_replay_a_file_of_a_scenario_built_otherwise(
@@ -295,9 +305,10 @@ def test_demo_run_as_a_program_takes_its_command_line(tmp_path, capsys):
 
 @pytest.mark.parametrize("name", _NAMES)
 def test_demo_run_as_a_program_searches_the_scenario_that_is_named(name):
-    # As a program, which can be cut: the control of the lost update tries
-    # a refused write again, and a search of a control that never ended
-    # would hang a test that made it here.
+    # As a program, which can be cut: the control of the lost update and
+    # the compare-and-set doctor of the write skew try a refused write
+    # again, and a search that never ended would hang a test that made it
+    # here.
     message, status = _SEARCHED[name]
     searched = _program("--scenario", name)
     # With what the program wrote as an error, should it print nothing.
@@ -320,6 +331,19 @@ def test_demo_searches_the_lost_update_and_prints_its_shrunk_failure(capsys):
         "  3. editor-1: write(lines=('editor-1',)) -> None",
         "  4. editor-2: write(lines=('editor-2',)) -> None",
     ]
+
+
+def test_demo_searches_the_fix_that_fails_and_prints_what_the_readme_says():
+    # As a program, which can be cut: the doctor of this fix tries a
+    # refused write again. Both compare-and-sets return True in the shrunk
+    # failure.
+    searched = _program("--scenario", "write-skew-cas")
+    assert searched.returncode == 1, searched.stderr
+    assert searched.stdout.splitlines()[-2:] == [
+        "  3. doctor-1: leave_if(person='doctor-1', version=0) -> True",
+        "  4. doctor-2: leave_if(person='doctor-2', version=0) -> True",
+    ]
+    _assert_readme_shows(searched.stdout)
 
 
 def test_demo_without_a_name_searches_the_first_scenario_it_knows(capsys):

@@ -92,13 +92,16 @@ A replay runs the scenario the file names. The demo knows these by name:
     oversell-atomic
     lost-update-naive
     lost-update-cas
+    write-skew-naive
+    write-skew-cas
+    write-skew-atomic
 
-It builds the first two with a stock of 1 and 2 buyers and the last two
-with 2 editors. `oversell-atomic` and `lost-update-cas` are the controls.
-A file names its scenario and nothing else of it. A file of a scenario
-built with other numbers is replayed on the build above, and where its run
-differs it ends the demo with the error of a file that replays to another
-trace.
+It builds the oversell with a stock of 1 and 2 buyers, the lost update
+with 2 editors and the write skew with 2 doctors. `oversell-atomic`,
+`lost-update-cas` and `write-skew-atomic` are the controls. A file names
+its scenario and nothing else of it. A file of a scenario built with other
+numbers is replayed on the build above, and where its run differs it ends
+the demo with the error of a file that replays to another trace.
 
 The search runs the first of them. To search another, name it:
 
@@ -108,6 +111,23 @@ The search of a control finds no violation and exits with 0. `--save`
 then writes no file, and a file of that name is left as it was.
 `--scenario` is not taken together with `--replay`, whose file names its
 scenario.
+
+`write-skew-cas` is not a control but a fix that fails. Its search finds
+the failure of `write-skew-naive` again and exits with 1:
+
+    write-skew-cas: violation found at seed 4
+      nobody is on call
+    schedule: doctor-1 doctor-2 doctor-1 doctor-2
+    shrunk from 3 context switches to 2
+      nobody is on call
+    schedule: doctor-2 doctor-1 doctor-1 doctor-2
+      1. doctor-2: read() -> (('doctor-1', 0, True), ('doctor-2', 0, True))
+      2. doctor-1: read() -> (('doctor-1', 0, True), ('doctor-2', 0, True))
+      3. doctor-1: leave_if(person='doctor-1', version=0) -> True
+      4. doctor-2: leave_if(person='doctor-2', version=0) -> True
+
+Each doctor leaves if its own entry still has the version it read. Both
+entries do, so both writes go through.
 
 ## How it works
 

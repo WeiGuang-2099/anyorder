@@ -20,6 +20,7 @@ from anyorder import shrink
 from anyorder import tracefile
 from anyorder.scenarios import lost_update
 from anyorder.scenarios import oversell
+from anyorder.scenarios import write_skew
 
 _SEEDS = range(100)
 # A trace file names its scenario and gives nothing else of it, so each
@@ -31,6 +32,9 @@ _BUILDS: Mapping[str, Callable[[], scheduler.Scenario]] = {
     "oversell-atomic": functools.partial(oversell.atomic, stock=1, buyers=2),
     "lost-update-naive": functools.partial(lost_update.naive, editors=2),
     "lost-update-cas": functools.partial(lost_update.cas, editors=2),
+    "write-skew-naive": functools.partial(write_skew.naive, doctors=2),
+    "write-skew-cas": functools.partial(write_skew.cas, doctors=2),
+    "write-skew-atomic": functools.partial(write_skew.atomic, doctors=2),
 }
 
 
