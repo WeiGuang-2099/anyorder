@@ -62,11 +62,15 @@ async def naive_editor(ctx: scheduler.AgentContext) -> None:
 
 async def cas_editor(ctx: scheduler.AgentContext) -> None:
     # A write is refused only when another editor's write went through
-    # since the read, and each editor's goes through once, so this ends.
+    # since the read, and each editor's goes through once, so this ends on
+    # a document that does not raise.
     while True:
         version, lines = await ctx.call("read")
-        if await ctx.call(
-                "write_if", version=version, lines=(*lines, ctx.name)):
+        wrote = await ctx.call(
+            "write_if", version=version, lines=(*lines, ctx.name))
+        # Only True is a write that went through: a tool that raised gives
+        # its editor a value that is true as well.
+        if wrote is True:
             return
 
 

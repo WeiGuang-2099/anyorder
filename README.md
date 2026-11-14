@@ -177,10 +177,11 @@ counts as ending the same.
 * A run goes on to its end after an invariant fails, and keeps only the
   first violation.
 * A tool that raises does not end the run. Its agent gets the error's
-  class name and text as the result of the call, and may ignore it. A call
-  with the wrong arguments is such an error. A call to a tool the world
-  lacks still ends the run, and so does an interrupt or one of the
-  scheduler's own errors raised inside a tool.
+  class name and text as the result of the call, and may ignore it. That
+  result is true, so an agent that reads a result by truth takes an error
+  for a yes. A call with the wrong arguments is such an error. A call to a
+  tool the world lacks still ends the run, and so does an interrupt or one
+  of the scheduler's own errors raised inside a tool.
 * A call's arguments and a tool's result are kept in the trace by
   reference, so a list that is passed in or returned shows its final
   content.
@@ -204,7 +205,9 @@ counts as ending the same.
   still ends under every schedule: it reads again first, a write is
   refused only when another editor's went through since the read, and each
   editor's goes through once. An editor that made the same refused call
-  again would never end, and nothing here would cut its run.
+  again would never end, and nothing here would cut its run. Nor would the
+  control end on a document whose compare-and-set raised every time: only
+  True is a write that went through to it, and it tries again.
 * The invariant of the lost update, that no line the document once held is
   gone, knows a line by its text. It is a rule for editors that only add
   lines, each a line of its own: two that add the same text can lose an

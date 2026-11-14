@@ -3,12 +3,14 @@
 The document's tools come first, then the naive editors with their counts
 worked out by hand, then the control. After them come shrinking, trace
 files and three wrong controls of the tests' own, which show what each
-oracle sees of an editor that handles a refused write badly.
+oracle sees of an editor that handles a refused write badly. Documents
+whose compare-and-set raises come last.
 """
 
 import collections
 import dataclasses
 import itertools
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -52,9 +54,10 @@ class _StepLimitError(scheduler.SchedulerError):
 class _Limited:
     """A world that refuses the call after the last one it allows.
 
-    An editor that handles a refused write wrongly may never end. The
-    scheduler passes its own errors on and gives them to no agent, so such
-    a run fails its test where it would hang it.
+    An editor that handles a refused write wrongly, or whose tool raises
+    every time, may never end. The scheduler passes its own errors on and
+    gives them to no agent, so such a run fails its test where it would
+    hang it.
     """
 
     def __init__(self, world: Any, calls: int) -> None:
@@ -115,6 +118,27 @@ async def _stubborn_editor(ctx: scheduler.AgentContext) -> None:
     while not await ctx.call(
             "write_if", version=version, lines=(*lines, ctx.name)):
         pass
+
+
+class _RaisesOnce(lost_update.Document):
+    """A document whose first compare-and-set raises and stores nothing."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raised = False
+
+    def write_if(self, version: int, lines: Sequence[str]) -> bool:
+        if not self.raised:
+            self.raised = True
+            raise RuntimeError("try again")
+        return super().write_if(version, lines)
+
+
+class _AlwaysRaises(lost_update.Document):
+    """A document whose compare-and-set raises every time."""
+
+    def write_if(self, version: int, lines: Sequence[str]) -> bool:
+        raise RuntimeError("try again")
 
 
 def _edited_by(editor: scheduler.Agent) -> scheduler.Scenario:
@@ -521,3 +545,43 @@ def test_editor_that_tries_again_without_reading_never_ends():
         explore.replay(scenario, (_E1, _E2, _E1) + (_E2,) * 18)
     with pytest.raises(_StepLimitError):
         explore.explore(scenario, range(20))
+
+
+def test_editor_whose_write_raised_reads_again_and_writes():
+    # The scheduler gives the editor the error as a value, and that value
+    # is true. An editor that read the result by truth would take the
+    # error for a write that went through and stop. No line is lost and
+    # the one serial order ends the same way, so neither oracle would see
+    # that its line was never added.
+    scenario = _limited(
+        dataclasses.replace(
+            lost_update.cas(editors=1), make_world=_RaisesOnce),
+        4)
+    run = explore.replay(scenario, (_E1,) * 4)
+    asked = {"version": 0, "lines": (_E1,)}
+    assert [(step.tool, step.args, step.result) for step in run.steps] == [
+        ("read", {}, (0, ())),
+        ("write_if", asked, scheduler.Raised("RuntimeError", "try again")),
+        ("read", {}, (0, ())),
+        ("write_if", asked, True),
+    ]
+    assert run.violation is None
+    # It writes what it reads after the error, not what it read before:
+    # here editor-2 reads and writes in between.
+    both = _limited(
+        dataclasses.replace(lost_update.cas(), make_world=_RaisesOnce), 6)
+    last = explore.replay(both, (_E1, _E1, _E2, _E2, _E1, _E1)).steps[-1]
+    assert (last.agent, last.tool, last.args, last.result) == (
+        _E1, "write_if", {"version": 1, "lines": (_E2, _E1)}, True)
+
+
+def test_editor_whose_write_raises_every_time_never_ends():
+    # What taking only True for a write costs: the editor tries again
+    # after an error as after a refusal, and does not look at what the
+    # error says. Cut at the 20 calls the test allows.
+    scenario = _limited(
+        dataclasses.replace(
+            lost_update.cas(editors=1), make_world=_AlwaysRaises),
+        20)
+    with pytest.raises(_StepLimitError, match="no call is left"):
+        explore.replay(scenario, (_E1,) * 21)
