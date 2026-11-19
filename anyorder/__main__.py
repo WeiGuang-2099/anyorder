@@ -57,10 +57,15 @@ def _print_steps(result: scheduler.RunResult) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m anyorder")
+    # The names go below the options, one to a line and laid out here.
+    # Shown as choices they are one word, wider than a terminal.
+    names = "".join(f"\n  {name}" for name in _BUILDS)
+    parser = argparse.ArgumentParser(
+        prog="python -m anyorder", epilog=f"scenarios:{names}",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--scenario", choices=tuple(_BUILDS),
-        help="search the scenario of this name and not the first of them. "
+        "--scenario", metavar="NAME", choices=tuple(_BUILDS),
+        help="search the scenario NAME and not the first of those below. "
              "Not with --replay, whose file names its scenario")
     group = parser.add_mutually_exclusive_group()
     group.add_argument(

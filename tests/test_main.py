@@ -398,6 +398,19 @@ def test_demo_refuses_a_scenario_it_does_not_know(capsys):
     assert places == sorted(places)
 
 
+def test_demo_help_lists_the_scenarios_one_to_a_line(monkeypatch, capsys):
+    # argparse takes the width of the terminal from COLUMNS. Shown as
+    # choices the names are one word, longer than a terminal of 80 columns
+    # is wide.
+    monkeypatch.setenv("COLUMNS", "80")
+    status, printed = _exit_status(["--help"], capsys)
+    assert status == 0
+    lines = printed.out.splitlines()
+    assert max(len(line) for line in lines) <= 80
+    # Each name alone on its line, in the order of the README's list.
+    assert [line.strip() for line in lines if line.strip() in _NAMES] == _NAMES
+
+
 @pytest.mark.parametrize("saved", [True, False], ids=["good", "missing"])
 def test_demo_refuses_a_scenario_together_with_replay(
     saved, tmp_path, capsys
