@@ -2,10 +2,17 @@
 
 An agent is a coroutine that reaches its world only through
 AgentContext.call. Each call hands one Effect to the scheduler and suspends
-the agent, so the scheduler always holds one pending effect per unfinished
+the agent, so the scheduler always holds one pending call per unfinished
 agent. A policy picks which of them runs next, and its picks are the only
 source of ordering: the list of chosen agent names is the schedule, and the
 same scenario under the same schedule gives the same trace.
+
+A call is by value. An argument is taken when its agent awaits the call and
+a result when its tool returns, as values.take takes a value: the tool, the
+agent and the trace each get a copy of their own of whatever could change.
+So the trace holds each value as it was at its call, and an agent and its
+world share nothing but what a call carries. A value that no call carries
+ends the run.
 
 Nothing here reads the clock, starts a thread or uses an event loop.
 """
@@ -13,6 +20,7 @@ Nothing here reads the clock, starts a thread or uses an event loop.
 from __future__ import annotations
 
 import dataclasses
+import operator
 import random
 from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
 from typing import Any, Protocol
@@ -34,6 +42,10 @@ class UnknownToolError(SchedulerError):
 
 class UnsupportedAwaitError(SchedulerError):
     """An agent awaited something other than a tool call."""
+
+
+class UnsupportedValueError(SchedulerError):
+    """An argument or a result is not a value a call carries."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -64,10 +76,13 @@ class AgentContext:
 
         Args:
             tool: Name of a public method on the scenario's world.
-            **args: Keyword arguments for the call.
+            **args: Keyword arguments for the call. They are taken at this
+                await: what the agent does to them afterwards is no part
+                of the call.
 
         Returns:
-            Whatever the tool returns, or a Raised if the tool raised.
+            What the tool returns, or a Raised if the tool raised. A
+            list or a dict in it is the agent's own copy.
         """
         return await Effect(tool, args)
 
@@ -124,8 +139,10 @@ class Step:
     Attributes:
         agent: The agent the policy chose.
         tool: The tool it called.
-        args: The call's keyword arguments.
-        result: What the tool returned, or a Raised if it raised.
+        args: The call's keyword arguments, as they were when the agent
+            awaited the call.
+        result: What the tool returned, or a Raised if it raised, as it
+            was when the call returned.
     """
 
     agent: str
@@ -208,7 +225,11 @@ class ReplayPolicy:
         return name
 
 
-_Pending = dict[str, tuple[Coroutine[Any, Any, None], Effect]]
+# By agent: its coroutine, the tool and the arguments of the call it waits
+# to make, and whether none of the arguments can change. The arguments are
+# the scheduler's own since the await.
+_Pending = dict[
+    str, tuple[Coroutine[Any, Any, None], str, dict[str, Any], bool]]
 
 
 def run(scenario: Scenario, policy: Policy) -> RunResult:
@@ -229,6 +250,10 @@ def run(scenario: Scenario, policy: Policy) -> RunResult:
         UnknownToolError: An agent called a tool the world lacks.
         UnsupportedAwaitError: An agent awaited something other than
             AgentContext.call.
+        UnsupportedValueError: An argument or a result is not a value a
+            call carries. An argument is refused when its agent awaits
+            the call, before the tool runs and before the policy is
+            asked again. A result is refused once its tool has run.
     """
     world = scenario.make_world()
     pending: _Pending = {}
@@ -239,19 +264,27 @@ def run(scenario: Scenario, policy: Policy) -> RunResult:
         violation = _first_violation(scenario, world, 0, every_step=True)
         while pending:
             name = policy.choose(sorted(pending))
-            coroutine, effect = pending[name]
-            result = _apply(world, effect)
-            steps.append(Step(name, effect.tool, dict(effect.args), result))
+            coroutine, tool, args, fixed = pending[name]
+            # A copy of its own for the tool: what it does to a list it is
+            # given must not show in the trace.
+            returned = _apply(
+                world, tool, args if fixed else values.take(args))
+            result = _taken_result(name, tool, returned)
+            # And one for the agent, which may change what it is given. A
+            # value that was handed back as it is cannot change.
+            handed = (
+                returned if result is returned else values.take(result))
+            steps.append(Step(name, tool, args, result))
             if violation is None:
                 violation = _first_violation(
                     scenario, world, len(steps), every_step=True)
             # Not sooner: an error raised above leaves the agent here to be
             # closed.
             del pending[name]
-            _advance(pending, name, coroutine, result)
+            _advance(pending, name, coroutine, handed)
     finally:
         # An error leaves agents suspended mid-call.
-        for coroutine, _ in pending.values():
+        for coroutine, *_ in pending.values():
             _close(coroutine)
     if violation is None:
         violation = _first_violation(
@@ -275,7 +308,69 @@ def _advance(
         raise UnsupportedAwaitError(
             f"agent {name!r} awaited {type(effect).__name__}; an agent may "
             "only await AgentContext.call")
-    pending[name] = (coroutine, effect)
+    try:
+        tool = effect.tool
+        args, fixed = _taken_args(name, tool, effect.args)
+    except BaseException:
+        # Whatever was raised, an interrupt too: the agent is not among
+        # the pending ones that run closes.
+        _close(coroutine)
+        raise
+    pending[name] = (coroutine, tool, args, fixed)
+
+
+def _taken_args(
+    name: str, tool: str, given: Mapping[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    """Returns a call's arguments as they are when its agent awaits it.
+
+    Now, and not when the call runs: until then the agent's own lists stay
+    in reach of whoever else holds them.
+
+    Returns:
+        The arguments in a dict of the scheduler's own, and whether none of
+        them can change. Then the tool may be given these very values.
+
+    Raises:
+        UnsupportedValueError: An argument is not a value a call carries,
+            or the arguments are no mapping.
+    """
+    if type(given) is not dict:
+        # An agent can await an Effect it built itself, with any mapping.
+        # What is looked at below must be a dict and nothing that can say
+        # otherwise. And a list of pairs is no mapping, though dict would
+        # make one of it.
+        if not isinstance(given, Mapping):
+            raise UnsupportedValueError(
+                f"agent {name!r} cannot call {tool!r}: its arguments are of "
+                f"type {type(given).__name__}, not a mapping")
+        given = dict(given)
+    if not given:
+        # Most reads: nothing to take.
+        return {}, True
+    try:
+        args = values.take(given)
+    except values.NotTakenError as error:
+        raise UnsupportedValueError(
+            f"agent {name!r} cannot call {tool!r}: {error}") from None
+    # A value that cannot change is handed back as it is.
+    fixed = all(map(operator.is_, args.values(), given.values()))
+    return args, fixed
+
+
+def _taken_result(name: str, tool: str, result: Any) -> Any:
+    """Returns a result as it is when its tool returns.
+
+    Raises:
+        UnsupportedValueError: The result is not a value a call carries.
+            Its tool has run all the same.
+    """
+    try:
+        return values.take(result)
+    except values.NotTakenError as error:
+        raise UnsupportedValueError(
+            f"{tool!r} ran for agent {name!r} and its result is refused: "
+            f"{error}") from None
 
 
 def _close(coroutine: Coroutine[Any, Any, None]) -> None:
@@ -291,26 +386,35 @@ def _close(coroutine: Coroutine[Any, Any, None]) -> None:
         pass
 
 
-def _apply(world: Any, effect: Effect) -> Any:
-    """Calls the effect's tool on the world.
+def _apply(world: Any, name: str, args: Mapping[str, Any]) -> Any:
+    """Calls a tool on the world.
 
     Returns:
         What the tool returned, or a Raised if it raised.
     """
     tool = None
-    if not effect.tool.startswith("_"):
-        tool = getattr(world, effect.tool, None)
+    if not name.startswith("_"):
+        tool = getattr(world, name, None)
     if not callable(tool):
         raise UnknownToolError(
-            f"{type(world).__name__} has no tool {effect.tool!r}")
+            f"{type(world).__name__} has no tool {name!r}")
     try:
-        return tool(**effect.args)
+        return tool(**args)
     except SchedulerError:
         # A refusal is never the agent's to handle, least of all a replay
         # that left its schedule.
         raise
     except Exception as error:
-        return Raised(type(error).__name__, str(error))
+        return Raised(_plain(type(error).__name__), _plain(str(error)))
+
+
+def _plain(text: str) -> str:
+    """Returns a text as a str and nothing more.
+
+    An error can give its name or its text as an instance of a subclass of
+    str, and no call carries one.
+    """
+    return text if type(text) is str else str.__str__(text)
 
 
 def _first_violation(

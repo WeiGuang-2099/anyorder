@@ -31,8 +31,8 @@ integer 1, and a number with more digits than a float keeps holds the
 float nearest to it. Nothing is turned back into a value of a run, so the
 only way from a file to a run is to replay it.
 
-The values are those the trace held when the run ended: an argument or a
-result that was changed after its call shows its final content.
+The values are those of the calls, as the scheduler takes them: an argument
+as its agent gave it and a result as its tool returned it.
 
 Nothing here opens a file. The caller reads and writes the text.
 """
@@ -47,10 +47,13 @@ from typing import Any
 
 from anyorder import explore
 from anyorder import scheduler
+from anyorder import values
 
 VERSION = 1
 
-_MAX_DEPTH = 100
+# The scheduler takes no value nested deeper than a line lets a result be,
+# and the line is one level itself.
+_MAX_DEPTH = values.ROOM + 1
 _OPENING = "anyorder-trace"
 _STEP = {"agent": str, "tool": str, "args": dict, "result": object}
 _VIOLATION = {"invariant": str, "message": str, "step": int}
@@ -175,6 +178,9 @@ def replay(
             Nothing has run.
         ReplayDivergenceError: The run left the file's schedule, or a step
             or the violation is not written as the file holds it.
+        UnsupportedValueError: The scenario makes a call with a value no
+            call carries, under this schedule. That ends its run, so
+            there is none to hold against the file.
     """
     if saved.scenario != scenario.name:
         raise ValueError(

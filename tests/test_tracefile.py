@@ -114,6 +114,16 @@ def _said(value: Any) -> scheduler.RunResult:
     return explore.replay(_echo(value), ("a",))
 
 
+def _built(value: Any) -> scheduler.RunResult:
+    """A run of the echo scenario with a value, put together by hand.
+
+    The scheduler makes no run with a value that no call carries, and the
+    writer must still refuse to write one.
+    """
+    return scheduler.RunResult(
+        (scheduler.Step("a", "say", {"value": value}, value),), None)
+
+
 def _text(lines: Sequence[str]) -> str:
     return "".join(f"{line}\n" for line in lines)
 
@@ -663,13 +673,16 @@ def test_text_with_a_surrogate_that_is_not_escaped_is_refused(halves):
         tracefile.loads(text)
 
 
-def test_run_with_a_value_no_file_holds_is_not_the_run_of_a_file():
-    # A set is written as nothing, so no file holds this run, whatever the
-    # file says the call returned.
+def test_scenario_with_a_value_no_call_carries_does_not_replay_a_file():
+    # The file says the call was made with a list. The scenario makes it
+    # with a set, which no call carries, so its run ends at the call. That
+    # is a refusal of the scenario and not a divergence: there is no run
+    # to hold against the file.
     saved = tracefile.loads(_echo_file("[1, 2]"))
     with pytest.raises(
-            scheduler.ReplayDivergenceError,
-            match="step 1: a trace file does not hold {1, 2}, of type set"):
+            scheduler.UnsupportedValueError,
+            match="^agent 'a' cannot call 'say': a call does not carry "
+                  "{1, 2}, of type set$"):
         tracefile.replay(_echo({1, 2}), saved)
 
 
@@ -687,17 +700,18 @@ def _chain(links: int) -> Any:
     return value
 
 
-def test_run_with_a_value_python_cannot_show_is_not_the_run_of_a_file():
+def test_scenario_with_a_value_python_cannot_show_does_not_replay_a_file():
     # The refusal shows the value, and to show a chain of 5000 links
-    # Python calls deeper than it can. The run is refused all the same.
+    # Python calls deeper than it can. The run is refused all the same,
+    # and with the error of a value that no call carries.
     value = _chain(5000)
     with pytest.raises(RecursionError):
         repr(value)
     saved = tracefile.loads(_echo_file("1"))
     with pytest.raises(
-            scheduler.ReplayDivergenceError,
-            match="step 1: a trace file does not hold a value too deep to "
-                  "show, of type _Link$"):
+            scheduler.UnsupportedValueError,
+            match="a call does not carry a value that cannot be shown, of "
+                  "type _Link$"):
         tracefile.replay(_echo(value), saved)
 
 
@@ -716,17 +730,16 @@ def test_tool_error_replays_from_its_file():
             _door(), tracefile.loads(text.replace("stuck", "open")))
 
 
-def test_file_holds_a_shared_list_with_its_final_content():
-    # The trace keeps results by reference, and the world returns its own
-    # list, so the first step shows both entries although its call
-    # returned one. A replay is compared once it is over, so the file that
-    # replays is the one with the final content, and the file with what
-    # the call returned is refused. This pins what happens. It is a limit.
-    run = tracefile.replay(
-        _ledger(), tracefile.loads(_ledger_file('["a", "b"]')))
-    assert run.steps[0].result == ["a", "b"]
+def test_file_holds_a_shared_list_as_it_was_at_each_call():
+    # The world returns its own list, and the second call changes it. The
+    # trace holds each result as it was when its call returned, so the
+    # file that replays is the one with what the first call returned, and
+    # the file with the final content is refused.
+    run = tracefile.replay(_ledger(), tracefile.loads(_ledger_file('["a"]')))
+    assert [step.result for step in run.steps] == [["a"], ["a", "b"]]
     with pytest.raises(scheduler.ReplayDivergenceError, match="step 1 is "):
-        tracefile.replay(_ledger(), tracefile.loads(_ledger_file('["a"]')))
+        tracefile.replay(
+            _ledger(), tracefile.loads(_ledger_file('["a", "b"]')))
 
 
 class _Colour(enum.IntEnum):
@@ -819,33 +832,45 @@ def test_every_run_reads_back_and_replays_as_it_was_written(
         assert tracefile.replay(scenario, saved) == run
 
 
-@pytest.mark.parametrize(
-    "value,kind",
-    [
-        ({1, 2}, "set"),
-        (frozenset(), "frozenset"),
-        (b"x", "bytes"),
-        (object(), "object"),
-        (float("nan"), "float"),
-        (float("inf"), "float"),
-        (_Colour.RED, "_Colour"),
-        (_Point(1, 2), "_Point"),
-        (_Name("a"), "_Name"),
-        (_Stack([1]), "_Stack"),
-        (collections.OrderedDict(), "OrderedDict"),
-        ([{"a": ({2},)}], "set"),
-        ({1: "a"}, "dict"),
-        ({_Name("a"): 1}, "dict"),
-        (_Ratio(0.5), "_Ratio"),
-        (_Failure("K", "m"), "_Failure"),
-    ])
+_NOT_HELD = [
+    ({1, 2}, "set"),
+    (frozenset(), "frozenset"),
+    (b"x", "bytes"),
+    (object(), "object"),
+    (float("nan"), "float"),
+    (float("inf"), "float"),
+    (_Colour.RED, "_Colour"),
+    (_Point(1, 2), "_Point"),
+    (_Name("a"), "_Name"),
+    (_Stack([1]), "_Stack"),
+    (collections.OrderedDict(), "OrderedDict"),
+    ([{"a": ({2},)}], "set"),
+    ({1: "a"}, "dict"),
+    ({_Name("a"): 1}, "dict"),
+    (_Ratio(0.5), "_Ratio"),
+    (_Failure("K", "m"), "_Failure"),
+]
+
+
+@pytest.mark.parametrize("value,kind", _NOT_HELD)
 def test_value_the_file_cannot_hold_is_not_written(value, kind):
     # Written as its nearest JSON value it would be written as another
     # value is, and the file would replay against a run that is not its.
     with pytest.raises(
             TypeError,
             match=f"step 1: a trace file does not hold .*, of type {kind}$"):
-        tracefile.dumps(_echo(value), _said(value))
+        tracefile.dumps(_echo(value), _built(value))
+
+
+@pytest.mark.parametrize("value,kind", _NOT_HELD)
+def test_value_the_file_cannot_hold_does_not_run(value, kind):
+    # No call carries any of these either, so the run ends at the call,
+    # long before there is anything to write.
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^agent 'a' cannot call 'say': a call does not carry "
+                  f".*, of type {kind}$"):
+        _said(value)
 
 
 @pytest.mark.parametrize(
@@ -874,7 +899,7 @@ def test_value_python_cannot_show_is_not_written():
             TypeError,
             match="step 1: a trace file does not hold a value too deep to "
                   "show, of type _Link$"):
-        tracefile.dumps(_echo(value), _said(value))
+        tracefile.dumps(_echo(value), _built(value))
     # A message is shown the same way, and it is not in a step.
     scenario = scheduler.Scenario(
         name="echo",
@@ -896,7 +921,10 @@ def test_value_that_holds_itself_is_not_written():
     value: list[Any] = []
     value.append(value)
     with pytest.raises(TypeError, match="step 1: .* nested so deep"):
-        tracefile.dumps(_echo(value), _said(value))
+        tracefile.dumps(_echo(value), _built(value))
+    with pytest.raises(
+            scheduler.UnsupportedValueError, match="nested so deep"):
+        _said(value)
 
 
 @pytest.mark.parametrize(
@@ -916,11 +944,17 @@ def test_value_is_written_as_deep_as_a_line_may_be_and_no_deeper(wrap, most):
     saved = tracefile.loads(tracefile.dumps(_echo(fits), _said(fits)))
     assert tracefile.replay(_echo(fits), saved) == _said(fits)
     deeper = _nested(wrap, most + 1)
+    # The scheduler has the bound as well, so a run that is made holds
+    # nothing deeper. Put together by hand, one is not written.
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^agent 'a' cannot call 'say': .* nested so deep"):
+        _said(deeper)
     with pytest.raises(
             TypeError,
             match="step 1: a trace file does not hold a value nested so "
                   "deep: a line has at most 100 levels"):
-        tracefile.dumps(_echo(deeper), _said(deeper))
+        tracefile.dumps(_echo(deeper), _built(deeper))
 
 
 def test_result_is_written_one_level_deeper_than_an_argument():
@@ -941,13 +975,21 @@ def test_result_is_written_one_level_deeper_than_an_argument():
     run = explore.replay(fits, ("a",))
     saved = tracefile.loads(tracefile.dumps(fits, run))
     assert tracefile.replay(fits, saved) == run
-    deeper = made(_nested(lambda value: [value], 100))
+    value = _nested(lambda value: [value], 100)
+    deeper = made(value)
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^'make' ran for agent 'a' and its result is refused: "
+                  ".* nested so deep"):
+        explore.replay(deeper, ("a",))
+    by_hand = scheduler.RunResult(
+        (scheduler.Step("a", "make", {}, value),), None)
     with pytest.raises(
             TypeError,
             match="step 1: a trace file does not hold a value nested so "
                   "deep: a line has at most 100 levels of lists and "
                   "objects$"):
-        tracefile.dumps(deeper, explore.replay(deeper, ("a",)))
+        tracefile.dumps(deeper, by_hand)
 
 
 @pytest.mark.parametrize(
@@ -966,8 +1008,11 @@ def test_empty_value_at_the_bottom_takes_its_levels(empty, most):
     saved = tracefile.loads(tracefile.dumps(_echo(fits), _said(fits)))
     assert tracefile.replay(_echo(fits), saved) == _said(fits)
     deeper = around(most + 1)
+    with pytest.raises(
+            scheduler.UnsupportedValueError, match="nested so deep"):
+        _said(deeper)
     with pytest.raises(TypeError, match="step 1: .* nested so deep"):
-        tracefile.dumps(_echo(deeper), _said(deeper))
+        tracefile.dumps(_echo(deeper), _built(deeper))
 
 
 def test_value_nested_far_too_deep_is_not_written():
@@ -975,7 +1020,10 @@ def test_value_nested_far_too_deep_is_not_written():
     # the step.
     deep = _nested(lambda value: [value], 5000)
     with pytest.raises(TypeError, match="step 1: .* nested so deep"):
-        tracefile.dumps(_echo(deep), _said(deep))
+        tracefile.dumps(_echo(deep), _built(deep))
+    with pytest.raises(
+            scheduler.UnsupportedValueError, match="nested so deep"):
+        _said(deep)
 
 
 @pytest.mark.skipif(
@@ -1093,7 +1141,7 @@ def test_run_that_does_not_replay_is_not_written():
         tracefile.dumps(scenario, run)
 
 
-def test_run_whose_result_another_run_changes_is_not_written():
+def test_run_whose_list_outlives_it_replays_otherwise_and_is_not_written():
     shared: list[str] = []
 
     class Pile:
@@ -1109,15 +1157,16 @@ def test_run_whose_result_another_run_changes_is_not_written():
     scenario = scheduler.Scenario(
         name="pile", make_world=Pile, agents={"a": adder}, invariants=())
     run = scheduler.run(scenario, scheduler.RandomPolicy(0))
-    # The run and a replay of it hold the same list, so they compare
-    # equal whatever it holds. The text does not: written after the two
-    # runs it says two entries, and its replay gives three.
-    assert explore.replay(scenario, run.schedule) == run
+    # The run holds the list as its call returned it, with one entry, and
+    # a replay holds it with two. So a replay already tells that state
+    # outlives a run. The text is written from the first run, and its own
+    # replay is the third.
+    assert explore.replay(scenario, run.schedule) != run
     with pytest.raises(scheduler.ReplayDivergenceError) as caught:
         tracefile.dumps(scenario, run)
     assert str(caught.value) == (
         'step 1 is {"agent": "a", "tool": "add", "args": {}, '
-        '"result": ["x", "x"]} in the file and {"agent": "a", '
+        '"result": ["x"]} in the file and {"agent": "a", '
         '"tool": "add", "args": {}, "result": ["x", "x", "x"]} in the run')
 
 
