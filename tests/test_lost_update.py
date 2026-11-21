@@ -31,7 +31,7 @@ _BOTH_READ_FIRST = (_E1, _E2, _E1, _E2)
 _SMALLEST = {(_E1, _E2, _E2, _E1), (_E2, _E1, _E1, _E2)}
 _SHRUNK = (_E2, _E1, _E1, _E2)
 _SHRUNK_LINES = (
-    '{"kind": "anyorder-trace", "version": 1, '
+    '{"kind": "anyorder-trace", "version": 2, '
     '"scenario": "lost-update-naive"}',
     '{"kind": "step", "agent": "editor-2", "tool": "read", "args": {}, '
     '"result": {"$tuple": [0, {"$tuple": []}]}}',
@@ -489,6 +489,11 @@ def test_shrunk_failure_is_the_run_of_the_file_written_by_hand():
     text = "".join(f"{line}\n" for line in _SHRUNK_LINES)
     assert tracefile.dumps(scenario, run) == text
     assert tracefile.replay(scenario, tracefile.loads(text)) == run
+    # A file saved under version 1 holds the same lines, a tuple among
+    # them, and still replays.
+    old = text.replace('"version": 2', '"version": 1')
+    assert old != text
+    assert tracefile.replay(scenario, tracefile.loads(old)) == run
 
 
 def test_refused_write_goes_through_a_trace_file():

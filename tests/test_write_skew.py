@@ -33,7 +33,7 @@ _BOTH_READ_FIRST = (_D1, _D2, _D1, _D2)
 _SMALLEST = {(_D1, _D2, _D2, _D1), (_D2, _D1, _D1, _D2)}
 _SHRUNK = (_D2, _D1, _D1, _D2)
 _SHRUNK_LINES = (
-    '{"kind": "anyorder-trace", "version": 1, '
+    '{"kind": "anyorder-trace", "version": 2, '
     '"scenario": "write-skew-naive"}',
     '{"kind": "step", "agent": "doctor-2", "tool": "read", "args": {}, '
     '"result": {"$tuple": [{"$tuple": ["doctor-1", 0, true]}, '
@@ -53,7 +53,7 @@ _SHRUNK_LINES = (
 # was written. The two other tools that write do so through leave.
 _SERIAL = (_D1, _D1, _D2)
 _SERIAL_LINES = (
-    '{"kind": "anyorder-trace", "version": 1, '
+    '{"kind": "anyorder-trace", "version": 2, '
     '"scenario": "write-skew-naive"}',
     '{"kind": "step", "agent": "doctor-1", "tool": "read", "args": {}, '
     '"result": {"$tuple": [{"$tuple": ["doctor-1", 0, true]}, '
@@ -614,6 +614,11 @@ def test_run_is_the_run_of_the_file_written_by_hand(schedule, lines):
     text = "".join(f"{line}\n" for line in lines)
     assert tracefile.dumps(scenario, run) == text
     assert tracefile.replay(scenario, tracefile.loads(text)) == run
+    # A file saved under version 1 holds the same lines, tuples and
+    # booleans among them, and still replays.
+    old = text.replace('"version": 2', '"version": 1')
+    assert old != text
+    assert tracefile.replay(scenario, tracefile.loads(old)) == run
 
 
 def test_calls_of_the_fix_and_of_the_control_go_through_a_trace_file():

@@ -32,7 +32,14 @@ float nearest to it. Nothing is turned back into a value of a run, so the
 only way from a file to a run is to replay it.
 
 The values are those of the calls, as the scheduler takes them: an argument
-as its agent gave it and a result as its tool returned it.
+as its agent gave it when it awaited the call, and a result as its tool
+returned it. That is what version 2 says, and the writer writes version 2.
+Version 1 said less. Its values were those the trace held when the run
+ended, and a trace then kept a value by reference, so one that was changed
+after its call was written with its final content. A text of version 1 is
+still read, as a text of version 2 is. It replays where its run did not
+rest on a value being shared: none was changed after its call, and neither
+an agent nor a tool went by a list or a dict that the other still held.
 
 Nothing here opens a file. The caller reads and writes the text.
 """
@@ -49,7 +56,11 @@ from anyorder import explore
 from anyorder import scheduler
 from anyorder import values
 
-VERSION = 1
+VERSION = 2
+
+# The versions this reader knows. Their lines are the same, and what they
+# say of a value is not.
+_VERSIONS = (1, VERSION)
 
 # The scheduler takes no value nested deeper than a line lets a result be,
 # and the line is one level itself.
@@ -61,7 +72,7 @@ _JSON_NAMES = {str: "a string", int: "an integer", dict: "an object"}
 
 
 class FormatError(ValueError):
-    """A text is not a trace file of the version this reader knows."""
+    """A text is not a trace file of a version this reader knows."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -134,11 +145,12 @@ def loads(text: str) -> Saved:
         What the file holds. Nothing has checked it against a scenario.
 
     Raises:
-        FormatError: The text is empty, is of another version, lacks its
-            last line, or holds a blank line, a line or a key that this
-            version does not define, a key twice or a line nested too
-            deep. Nothing unknown is skipped: a reader that skipped a line
-            could replay another run and call it the same.
+        FormatError: The text is empty, is of a version this reader does
+            not know, lacks its last line, or holds a blank line, a line
+            or a key that its version does not define, a key twice or a
+            line nested too deep. Nothing unknown is skipped: a reader
+            that skipped a line could replay another run and call it the
+            same.
     """
     lines = text.split("\n")
     if lines[-1] == "":
@@ -422,10 +434,10 @@ def _opening(record: dict[str, Any]) -> str:
     version = record["version"]
     # Before the keys: another version may put other keys on this line.
     # By type too: True and 1.0 are equal to 1.
-    if type(version) is not int or version != VERSION:
+    if type(version) is not int or version not in _VERSIONS:
         raise FormatError(
             f"line 1 gives version {json.dumps(version)}, and this reader "
-            f"knows version {VERSION}")
+            f"knows versions {' and '.join(map(str, _VERSIONS))}")
     _expect_keys(1, record, ("version", "scenario"))
     return _typed(1, record, {"scenario": str})["scenario"]
 

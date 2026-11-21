@@ -89,7 +89,7 @@ def _names_in_the_refusal(tmp_path, capsys):
     """Returns the scenarios the demo names when a file has none of them."""
     path = tmp_path / "unknown.jsonl"
     path.write_text(
-        '{"kind": "anyorder-trace", "version": 1, "scenario": "unknown"}\n'
+        '{"kind": "anyorder-trace", "version": 2, "scenario": "unknown"}\n'
         '{"kind": "end", "violation": null}\n', encoding="utf-8")
     status, printed = _exit_status(["--replay", str(path)], capsys)
     assert status == 2
@@ -142,6 +142,18 @@ def test_demo_replays_a_saved_failure_and_prints_what_the_readme_says(
     # did: the message, the schedule and the six steps.
     assert replayed.splitlines()[1:] == searched.splitlines()[-8:]
     _assert_readme_shows(replayed)
+
+
+def test_demo_replays_a_file_of_version_1(tmp_path, capsys):
+    # What a demo before version 2 saved for this failure: the same
+    # lines under the older number.
+    path, _ = _saved_failure(tmp_path, capsys)
+    data = path.read_bytes()
+    assert data.count(b'"version": 2') == 1
+    path.write_bytes(data.replace(b'"version": 2', b'"version": 1'))
+    assert demo.main(["--replay", str(path)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == (
+        "oversell-naive: the file replays to the same trace")
 
 
 def test_demo_replays_a_file_with_other_line_ends(tmp_path, capsys):

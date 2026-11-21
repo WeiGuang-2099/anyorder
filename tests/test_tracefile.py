@@ -24,7 +24,7 @@ from anyorder.scenarios import oversell
 _SHRUNK = (
     "buyer-2", "buyer-1", "buyer-1", "buyer-1", "buyer-2", "buyer-2")
 _LINES = (
-    '{"kind": "anyorder-trace", "version": 1, "scenario": "oversell-naive"}',
+    '{"kind": "anyorder-trace", "version": 2, "scenario": "oversell-naive"}',
     '{"kind": "step", "agent": "buyer-2", "tool": "read_stock", '
     '"args": {}, "result": 1}',
     '{"kind": "step", "agent": "buyer-1", "tool": "read_stock", '
@@ -131,7 +131,7 @@ def _text(lines: Sequence[str]) -> str:
 def _echo_file(written: str) -> str:
     """The file of the echo scenario's run, with its value as written."""
     return _text((
-        '{"kind": "anyorder-trace", "version": 1, "scenario": "echo"}',
+        '{"kind": "anyorder-trace", "version": 2, "scenario": "echo"}',
         '{"kind": "step", "agent": "a", "tool": "say", '
         f'"args": {{"value": {written}}}, "result": {written}}}',
         _NO_VIOLATION,
@@ -170,7 +170,7 @@ def _ledger() -> scheduler.Scenario:
 def _ledger_file(first: str) -> str:
     """The file of a then b on the ledger, with the first result as given."""
     return _text((
-        '{"kind": "anyorder-trace", "version": 1, "scenario": "ledger"}',
+        '{"kind": "anyorder-trace", "version": 2, "scenario": "ledger"}',
         '{"kind": "step", "agent": "a", "tool": "add", '
         f'"args": {{"entry": "a"}}, "result": {first}}}',
         '{"kind": "step", "agent": "b", "tool": "add", '
@@ -203,19 +203,24 @@ _NOT_A_TRACE_FILE = [
      'line 1 is of kind "trace", not "anyorder-trace"'),
     (_edited(1, '"kind": "anyorder-trace", ', ""),
      'line 1 is of kind null, not "anyorder-trace"'),
-    (_edited(1, '"version": 1', '"version": 2'),
-     "line 1 gives version 2, and this reader knows version 1"),
-    (_edited(1, '"version": 1', '"version": "1"'),
-     "line 1 gives version \"1\", and"),
-    (_edited(1, '"version": 1', '"version": true'),
+    (_edited(1, '"version": 2', '"version": 3'),
+     "line 1 gives version 3, and this reader knows versions 1 and 2$"),
+    (_edited(1, '"version": 2', '"version": 0'),
+     "line 1 gives version 0, and this reader knows versions 1 and 2$"),
+    (_edited(1, '"version": 2', '"version": "2"'),
+     "line 1 gives version \"2\", and"),
+    # True is equal to 1, which is a version, and is not one.
+    (_edited(1, '"version": 2', '"version": true'),
      "line 1 gives version true, and"),
-    (_edited(1, '"version": 1', '"version": 1.0'),
+    (_edited(1, '"version": 2', '"version": 2.0'),
+     "line 1 gives version 2.0, and"),
+    (_edited(1, '"version": 2', '"version": 1.0'),
      "line 1 gives version 1.0, and"),
-    (_edited(1, '"version": 1, ', ""), "line 1 gives no version"),
+    (_edited(1, '"version": 2, ', ""), "line 1 gives no version"),
     # The version is looked at before the keys: a later version may put
     # other keys on this line.
-    (_edited(1, '"version": 1', '"version": 2, "draws": 3'),
-     "line 1 gives version 2, and"),
+    (_edited(1, '"version": 2', '"version": 3, "draws": 3'),
+     "line 1 gives version 3, and"),
     (_edited(1, "}", ', "seed": 4}'),
      "line 1 holds the keys kind, scenario, seed, version, not kind, "
      "scenario, version"),
@@ -261,7 +266,7 @@ _NOT_A_TRACE_FILE = [
     (_text(_LINES[:-1] + (
         f'{{"kind": "end", "violation": {"[" * 100}{"]" * 100}}}',)),
      "line 8 is nested deeper than 100 levels"),
-    (_edited(1, '"version": 1', '"version": 2, "version": 1'),
+    (_edited(1, '"version": 2', '"version": 3, "version": 2'),
      "line 1 cannot be read: an object gives the key 'version' twice"),
     (_edited(2, '"result": 1', '"result": 9, "result": 1'),
      "line 2 cannot be read: an object gives the key 'result' twice"),
@@ -352,6 +357,30 @@ def test_file_of_the_shrunk_failure_replays_to_it():
         "no-oversell",
         "2 orders placed against a stock of 1: buyer-1, buyer-2",
         6)
+
+
+def _version_1(text: str) -> str:
+    """A text with the number of version 1 in place of 2."""
+    assert text.count('"version": 2') == 1
+    return text.replace('"version": 2', '"version": 1')
+
+
+@pytest.mark.parametrize(
+    "buyers,lines",
+    [(2, _LINES), (2, _SERIAL_LINES), (3, _THIRD_BUYER_LINES)],
+    ids=["failure", "serial", "third-buyer"])
+def test_text_of_version_1_is_read_and_replays_as_version_2_does(
+    buyers, lines
+):
+    # No value of these runs is changed after its call, so the text holds
+    # the values of the calls, which is what version 2 asks, under
+    # either number.
+    scenario = oversell.naive(buyers=buyers)
+    new = tracefile.loads(_text(lines))
+    old = tracefile.loads(_version_1(_text(lines)))
+    assert old == new
+    assert tracefile.replay(scenario, old) == explore.replay(
+        scenario, old.schedule)
 
 
 def test_file_of_a_run_that_passed_replays_to_it():
@@ -641,7 +670,7 @@ def test_violation_with_a_surrogate_pair_is_not_the_violation_of_a_file(part):
         '"message": "broken", "step": 0}}')
     old = "holds" if part == "invariant" else "broken"
     saved = tracefile.loads(_text((
-        '{"kind": "anyorder-trace", "version": 1, "scenario": "echo"}',
+        '{"kind": "anyorder-trace", "version": 2, "scenario": "echo"}',
         end.replace(f'"{old}"', json.dumps(one)),
     )))
     assert saved.violation is not None and saved.violation[part] == one
@@ -717,7 +746,7 @@ def test_scenario_with_a_value_python_cannot_show_does_not_replay_a_file():
 
 def test_tool_error_replays_from_its_file():
     text = _text((
-        '{"kind": "anyorder-trace", "version": 1, "scenario": "door"}',
+        '{"kind": "anyorder-trace", "version": 2, "scenario": "door"}',
         '{"kind": "step", "agent": "a", "tool": "push", "args": {}, '
         '"result": {"$raised": {"kind": "RuntimeError", '
         '"message": "stuck"}}}',
@@ -730,16 +759,22 @@ def test_tool_error_replays_from_its_file():
             _door(), tracefile.loads(text.replace("stuck", "open")))
 
 
-def test_file_holds_a_shared_list_as_it_was_at_each_call():
+@pytest.mark.parametrize("version", [1, 2])
+def test_file_holds_a_shared_list_as_it_was_at_each_call(version):
     # The world returns its own list, and the second call changes it. The
     # trace holds each result as it was when its call returned, so the
     # file that replays is the one with what the first call returned, and
-    # the file with the final content is refused.
-    run = tracefile.replay(_ledger(), tracefile.loads(_ledger_file('["a"]')))
+    # the file with the final content is refused. Under version 1 too,
+    # whose writer wrote the final content for this run: its text is
+    # read, and it is not the run a scheduler makes now.
+    at_call, at_end = (
+        _ledger_file(first) if version == 2
+        else _version_1(_ledger_file(first))
+        for first in ('["a"]', '["a", "b"]'))
+    run = tracefile.replay(_ledger(), tracefile.loads(at_call))
     assert [step.result for step in run.steps] == [["a"], ["a", "b"]]
     with pytest.raises(scheduler.ReplayDivergenceError, match="step 1 is "):
-        tracefile.replay(
-            _ledger(), tracefile.loads(_ledger_file('["a", "b"]')))
+        tracefile.replay(_ledger(), tracefile.loads(at_end))
 
 
 class _Colour(enum.IntEnum):
