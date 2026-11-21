@@ -17,6 +17,8 @@ import random
 from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
 from typing import Any, Protocol
 
+from anyorder import values
+
 
 class SchedulerError(Exception):
     """Base class for the scheduler's refusals."""
@@ -111,20 +113,8 @@ class Scenario:
     invariants: Sequence[Invariant]
 
 
-@dataclasses.dataclass(frozen=True)
-class Raised:
-    """What a call gives its agent when the tool raised.
-
-    A value and not the exception: two exceptions alike do not compare
-    equal, and a run must compare equal to its replay.
-
-    Attributes:
-        kind: Name of the exception's class.
-        message: The exception as text.
-    """
-
-    kind: str
-    message: str
+# Defined with the values a call carries, of which it is one.
+Raised = values.Raised
 
 
 @dataclasses.dataclass(frozen=True)
