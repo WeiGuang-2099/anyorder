@@ -745,3 +745,26 @@ def test_exhaustive_search_tells_draws_that_python_takes_for_equal_apart():
             match="^agent 'a' of 'counting' drew True in one run and 1 in "
                   "another"):
         list(explore.exhaust(_counting(), Loose()))
+
+
+def test_exhaustive_search_tells_two_orders_of_a_drawn_dict_apart():
+    class Turning:
+        """Gives one dict, in another order from the second time on."""
+
+        def __init__(self) -> None:
+            self._asked = 0
+
+        def sample(
+            self, agent: str, request: Any, moment: scheduler.Moment
+        ) -> dict[str, int]:
+            self._asked += 1
+            return {"x": 1, "y": 2} if self._asked == 1 else {"y": 2, "x": 1}
+
+    # The two are equal as Python compares, and a replay gives the dict
+    # back in the order it was drawn in. An agent can go by that order,
+    # so these are two draws at one place.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^agent 'a' of 'counting' drew {'x': 1, 'y': 2} in one "
+                  "run and {'y': 2, 'x': 1} in another"):
+        list(explore.exhaust(_counting(), Turning()))

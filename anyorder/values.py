@@ -23,10 +23,13 @@ about a hundred calls of Python's stack, and twice as many before Python
 
 key gives a hashable that stands for a value as a trace file writes it:
 two values have one key exactly when a file writes them alike. Python
-takes True, 1 and 1.0 for equal, and an agent that is given one can go on
-otherwise than an agent that is given another, so whatever looks a value
-up, such as a search that asks whether it has stood here before, goes by
-the key and not by the value.
+takes True, 1 and 1.0 for equal, and two dicts that hold the same under
+keys in another order, and an agent that is given one can go on otherwise
+than an agent that is given the other. So whatever looks a value up, such
+as a search that asks whether it has stood here before, goes by the key
+and not by the value. A key is finer than the reader of a file in one
+thing: a file is held against a run with no eye for the order of a dict's
+keys, and a key keeps that order.
 
 Nothing here imports the rest of the package.
 """
@@ -137,9 +140,11 @@ def key(value: Any, room: int = ROOM) -> Hashable:
     """Returns a hashable that stands for a value as a trace file writes it.
 
     Two values have equal keys exactly when a file writes them alike. So
-    True, 1 and 1.0 have three keys, 0.0 and -0.0 have two, and so have a
-    list and the tuple of its parts, where Python takes each of those for
-    equal. A dict has one key whatever the order of its own keys.
+    True, 1 and 1.0 have three keys and 0.0 and -0.0 have two, where Python
+    takes each of those for equal. So have two dicts that hold the same
+    under keys in another order: a dict is handed on in the order it was
+    given, and whoever is handed it can go by that. A list and the tuple of
+    its parts have two keys as well.
 
     Args:
         value: A value a call carries, or a part of one.
@@ -171,7 +176,7 @@ def key(value: Any, room: int = ROOM) -> Hashable:
     if kind is dict and _all_strings(value):
         left = _left(room, 1)
         return ("dict", tuple(
-            (name, key(value[name], left)) for name in sorted(value)))
+            (name, key(part, left)) for name, part in value.items()))
     if kind is Raised:
         left = _left(room, 2)
         return ("raised", key(value.kind, left), key(value.message, left))

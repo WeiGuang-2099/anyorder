@@ -553,7 +553,7 @@ _APART = [
     [], (), {}, [1], (1,), [True], [1.0], [[1]], [(1,)], ([1],), [1, 2],
     [2, 1],
     {"a": 1}, {"a": True}, {"a": 1.0}, {"a": [1]}, {"b": 1},
-    {"a": 1, "b": 1}, {"a": {"b": 1}},
+    {"a": 1, "b": 1}, {"b": 1, "a": 1}, {"a": {"b": 1}},
     scheduler.Raised("K", "m"), scheduler.Raised("K", "n"),
     scheduler.Raised("m", "K"), scheduler.Raised(1, None),
     {"kind": "K", "message": "m"}, ("raised", "K", "m"), ("K", "m"),
@@ -576,8 +576,8 @@ def test_key_is_another_for_every_value_a_file_writes_otherwise():
     "one,other",
     [
         ([1, [2, (3,)]], [1, [2, (3,)]]),
-        ({"a": 1, "b": [2]}, {"b": [2], "a": 1}),
-        ({"a": {"x": 1, "y": 2}}, {"a": {"y": 2, "x": 1}}),
+        ({"a": 1, "b": [2]}, {"a": 1, "b": [2]}),
+        ({"a": {"x": 1, "y": 2}}, {"a": {"x": 1, "y": 2}}),
         (scheduler.Raised("K", "m"), scheduler.Raised("K", "m")),
         (0.1 + 0.2, 0.30000000000000004),
         (10**30, 10**30),
@@ -661,7 +661,22 @@ def test_key_is_written_as_the_kind_of_its_value_and_the_keys_of_its_parts():
     assert values.key([1, "a", None]) == ("list", (1, "a", None))
     assert values.key((1, [2])) == ("tuple", (1, ("list", (2,))))
     assert values.key({"b": False, "a": (2,)}) == (
-        "dict", (("a", ("tuple", (2,))), ("b", ("bool", False))))
+        "dict", (("b", ("bool", False)), ("a", ("tuple", (2,)))))
     assert values.key(scheduler.Raised("K", "m")) == ("raised", "K", "m")
     assert values.key(scheduler.Raised("K", [1.0])) == (
         "raised", "K", ("list", (("float", "0x1.0000000000000p+0"),)))
+
+
+def test_key_keeps_the_order_of_the_keys_of_a_dict():
+    one = {"x": 1, "y": [2]}
+    other = {"y": [2], "x": 1}
+    # Equal as Python compares, and a trace file is held against a run
+    # with no eye for the order. But a dict is handed on in the order it
+    # was given, and whoever is handed it can go by that: the first key
+    # of one is not the first key of the other.
+    assert one == other
+    assert next(iter(values.take(one))) != next(iter(values.take(other)))
+    assert values.key(one) != values.key(other)
+    assert values.key({"a": one}) != values.key({"a": other})
+    assert values.key([one]) != values.key([other])
+    assert values.key(one) == values.key({"x": 1, "y": [2]})

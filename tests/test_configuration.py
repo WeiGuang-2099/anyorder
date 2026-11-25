@@ -500,6 +500,47 @@ def test_configuration_at_a_draw_holds_those_that_wait_beside_who_draws():
         (("a", ()), ("m", ()), ("z", (("call", "inc", _NO_ARGS, 1),))))]
 
 
+def test_agent_that_goes_by_the_order_of_a_dict_stands_at_another_place():
+    class Desk:
+        """Hands out two entries, in the order it was built with."""
+
+        def __init__(self, first: str) -> None:
+            self.first = first
+            self.said: list[str] = []
+
+        def entries(self) -> dict[str, int]:
+            if self.first == "x":
+                return {"x": 1, "y": 2}
+            return {"y": 2, "x": 1}
+
+        def say(self, word: str) -> None:
+            self.said.append(word)
+
+    async def reader(ctx: scheduler.AgentContext) -> None:
+        entries = await ctx.call("entries")
+        # By the order of the keys, which Python's comparison of two
+        # dicts does not look at.
+        await ctx.call("say", word=next(iter(entries)))
+
+    def run(first: str) -> tuple[Any, scheduler.RunResult]:
+        scenario = scheduler.Scenario(
+            name="desk", make_world=lambda: Desk(first),
+            agents={"a": reader}, invariants=(),
+            snapshot=lambda desk: tuple(desk.said))
+        following = _Following("aa")
+        return following, scheduler.run(scenario, following)
+
+    by_x, x_run = run("x")
+    by_y, y_run = run("y")
+    # The two reads are equal as Python compares, and the agent goes on
+    # otherwise. Before its second call the world is the same in both
+    # runs, so only the history can tell where the agent stands.
+    assert x_run.steps[0] == y_run.steps[0]
+    assert x_run.steps[1].args != y_run.steps[1].args
+    assert by_x.stood[1].state == by_y.stood[1].state
+    assert by_x.stood[1] != by_y.stood[1]
+
+
 def _configurations(
     scenario: scheduler.Scenario,
 ) -> tuple[int, dict[Hashable, Any]]:
