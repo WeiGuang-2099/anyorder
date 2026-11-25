@@ -1650,6 +1650,12 @@ def test_run_whose_names_are_not_strings_is_not_made_and_not_written():
             match="step 1: a trace file does not hold 'say', of type "
                   "_Name, as the tool's name"):
         tracefile.dumps(named, built("a", _Name("say")))
+    # With both names wrong it is the agent's that the writer refuses.
+    with pytest.raises(
+            TypeError,
+            match="step 1: a trace file does not hold 1, of type int, as "
+                  "the agent's name"):
+        tracefile.dumps(numbered, built(1, _Name("say")))
     # The name of a scenario is the file's alone to refuse, and so is a
     # string with a surrogate: a run with either is made.
     unnamed = scenario(None, "a", speaker)
