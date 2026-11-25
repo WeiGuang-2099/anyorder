@@ -202,6 +202,44 @@ def test_local_history_tells_what_python_takes_for_equal_apart():
     assert of_true[0] == ("draw", "coin", ("bool", True))
 
 
+def test_local_history_holds_the_arguments_of_a_call_in_the_order_given():
+    class Pad:
+        """Cells that agents mark."""
+
+        def __init__(self) -> None:
+            self.cells: dict[str, str] = {}
+
+        def put(self, cell: str, mark: str) -> None:
+            self.cells[cell] = mark
+
+    async def by_cell(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("put", cell="x", mark="o")
+
+    async def by_mark(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("put", mark="o", cell="x")
+
+    def made(agent: scheduler.Agent) -> tuple[Any, scheduler.RunResult]:
+        scenario = scheduler.Scenario(
+            name="pad", make_world=Pad, agents={"a": agent}, invariants=(),
+            snapshot=lambda pad: tuple(pad.cells.items()))
+        following = _Following("a")
+        run = scheduler.run(scenario, following)
+        return configuration.local_history(following.moment, "a"), run
+
+    cell_first, one = made(by_cell)
+    mark_first, other = made(by_mark)
+    # The two runs are one run as Python compares, and the arguments of a
+    # call are held in a history by their key like any other value, which
+    # keeps the order of a dict's keys: the order the agent wrote them in.
+    # So a call written the other way round is another history, and a
+    # table holds another draw after it.
+    assert one == other
+    assert cell_first == ((
+        "call", "put", ("dict", (("cell", "x"), ("mark", "o"))), None),)
+    assert mark_first == ((
+        "call", "put", ("dict", (("mark", "o"), ("cell", "x"))), None),)
+
+
 def test_configuration_is_the_state_and_the_history_of_each_that_waits():
     assert _stood(_counter(b=_adder_twice, c=_adder), "bcb") == [
         configuration.Configuration((0, ()), (("b", ()), ("c", ()))),
