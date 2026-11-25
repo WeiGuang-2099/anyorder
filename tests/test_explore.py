@@ -397,3 +397,186 @@ def test_three_buyer_oversell_is_seen_at_the_second_order():
     # A run goes on to its end after the violation.
     assert collections.Counter(len(run.steps) for run in failing) == {
         7: 144, 9: 540}
+
+
+# A counter starts at 0. b and c each add 1 in one call. a reads r and
+# then draws whether it sets the counter to r + 10: one time in four if r
+# is 0, one time in two otherwise. Run one after another, in any order,
+# the three leave 12 whenever a sets: r incs came before its read and the
+# other 2 - r come after its set. An inc between the read and the set is
+# lost, and the counter then ends below 12.
+_RARELY = ((True, 1), (False, 3))
+_EVENLY = ((True, 1), (False, 1))
+_LOSES_AN_INC = ("a", "c", "a", "b")
+
+
+class _Counter:
+    """A counter that remembers whether it was ever set."""
+
+    def __init__(self) -> None:
+        self.value = 0
+        self.was_set = False
+
+    def read(self) -> int:
+        return self.value
+
+    def inc(self) -> None:
+        self.value += 1
+
+    def set(self, value: int) -> None:
+        self.value = value
+        self.was_set = True
+
+
+async def _setter(ctx: scheduler.AgentContext) -> None:
+    r = await ctx.call("read")
+    if await ctx.draw(_RARELY if r == 0 else _EVENLY):
+        await ctx.call("set", value=r + 10)
+
+
+async def _adder(ctx: scheduler.AgentContext) -> None:
+    await ctx.call("inc")
+
+
+def _ends_at_12(counter: _Counter) -> str | None:
+    if counter.was_set and counter.value != 12:
+        return f"the counter ends at {counter.value}, not 12"
+    return None
+
+
+def _counting() -> scheduler.Scenario:
+    return scheduler.Scenario(
+        name="counting",
+        make_world=_Counter,
+        agents={"a": _setter, "b": _adder, "c": _adder},
+        invariants=(
+            scheduler.Invariant("ends-at-12", _ends_at_12, every_step=False),
+        ),
+    )
+
+
+def test_search_draws_and_finds_the_lost_inc():
+    failure = explore.explore(_counting(), range(20))
+    # At seed 0 both incs come before the read. At seed 1 a reads 0, draws
+    # that it sets, and c adds before it does.
+    assert failure == explore.Failure(1, scheduler.RunResult(
+        steps=(
+            scheduler.Step("a", "read", {}, 0),
+            scheduler.Step("c", "inc", {}, None),
+            scheduler.Step("a", "set", {"value": 10}, None),
+            scheduler.Step("b", "inc", {}, None),
+        ),
+        violation=scheduler.Violation(
+            "ends-at-12", "the counter ends at 11, not 12", 4),
+        draws=(scheduler.Drawn("a", _RARELY, True, 1),)))
+    assert failure.result.schedule == _LOSES_AN_INC
+
+
+def test_failure_that_drew_replays_from_its_schedule_and_its_draws():
+    scenario = _counting()
+    failure = explore.explore(scenario, range(20))
+    assert failure is not None
+    result = failure.result
+    assert explore.replay(scenario, result.schedule, result.draws) == result
+
+
+def test_schedule_alone_does_not_replay_a_run_that_drew():
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the draws end after 0 but agent 'a' asks for one more$"):
+        explore.replay(_counting(), _LOSES_AN_INC)
+
+
+def test_other_draw_under_the_same_schedule_is_another_run():
+    scenario = _counting()
+    stops = [scheduler.Drawn("a", _RARELY, False, 1)]
+    # With the other draw a stops after its read, so the schedule that has
+    # it set cannot even be followed.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError, match="^step 3 names 'a'"):
+        explore.replay(scenario, _LOSES_AN_INC, stops)
+    passed = explore.replay(scenario, ("a", "c", "b"), stops)
+    assert passed.violation is None
+    assert passed.draws == tuple(stops)
+
+
+def test_replay_refuses_draws_left_over():
+    held = [scheduler.Drawn("a", _RARELY, False, 1)] * 2
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the run made 1 draws but 2 were given$"):
+        explore.replay(_counting(), ("a", "b", "c"), held)
+    # A run that draws nothing leaves every draw over.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the run made 0 draws but 1 were given$"):
+        explore.replay(oversell.naive(), _SERIAL, held[:1])
+
+
+def test_replay_refuses_a_draw_held_at_another_step():
+    # a draws once its read has returned, which is after step 1 here.
+    for step in (0, 2):
+        held = [scheduler.Drawn("a", _RARELY, False, step)]
+        with pytest.raises(
+                scheduler.ReplayDivergenceError,
+                match=f"^draw 1 was made after 1 steps, not after {step}$"):
+            explore.replay(_counting(), ("a", "b", "c"), held)
+
+
+def test_replay_gives_a_draw_back_to_its_agent():
+    held = [scheduler.Drawn("a", _EVENLY, True, 2)]
+    run = explore.replay(_counting(), ("b", "a", "a", "c"), held)
+    # a reads 1, is given that it sets, and sets 11 before the last inc.
+    assert [step.tool for step in run.steps] == ["inc", "read", "set", "inc"]
+    assert run.steps[2].args == {"value": 11}
+    assert run.draws == tuple(held)
+    assert run.violation is None
+
+
+def test_uniform_search_loses_an_inc_five_times_in_36():
+    # A random policy chooses evenly among the waiting agents, so a's read
+    # is the first, second or third call of a run with a chance of 1/3
+    # each, and it reads 0, 1 or 2.
+    # * It reads 0 and sets one time in four. Its set then waits beside
+    #   both incs and is chosen before either with 1/3: an inc is lost
+    #   with 2/3.
+    # * It reads 1 and sets one time in two. Its set waits beside one
+    #   inc, which comes first with 1/2.
+    # * It reads 2, and no inc is left to lose.
+    # That is 1/3 * (1/4 * 2/3 + 1/2 * 1/2) = 1/3 * 5/12 = 5/36. Of 3600
+    # seeds it is 500, with a standard deviation of 21. The count is
+    # written out: the same seeds must fail under every Python.
+    scenario = _counting()
+    failed = sum(
+        explore.explore(scenario, [seed]) is not None for seed in range(3600))
+    assert failed == 501
+
+
+def test_search_refuses_a_failure_whose_draws_do_not_replay():
+    tickets = itertools.count()
+
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        # What it draws from outlives the run.
+        await ctx.draw(((next(tickets), 1),))
+        await ctx.call("ring")
+
+    scenario = scheduler.Scenario(
+        name="leaky-draw",
+        make_world=_Bell,
+        agents={"a": drawer},
+        invariants=(_ALWAYS_FAILS,),
+    )
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        explore.explore(scenario, range(1))
+    assert str(caught.value) == (
+        "draw 1 is from ((0, 1),), but agent 'a' asks to draw from "
+        "((1, 1),)")
+
+
+def test_exhaustive_search_does_not_run_a_scenario_that_draws():
+    # Its runs would have to share their draws, and one stream of draws
+    # gives an agent another sample under another schedule. Not built yet.
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError,
+            match="^agent 'a' awaited a draw, and the run has no sampler$"):
+        next(explore.exhaust(_counting()))

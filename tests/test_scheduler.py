@@ -1,6 +1,10 @@
-"""Checks the scheduler's ordering, refusals, tool errors and invariants."""
+"""Checks the scheduler's ordering, refusals, tool errors, invariants and draws.
+
+The samplers' tests come last: the seeded one, then the one that replays.
+"""
 
 import asyncio
+import collections
 import dataclasses
 import functools
 import inspect
@@ -1617,3 +1621,199 @@ def test_invariants_are_asked_before_an_agent_draws():
     # judged: step 1 is the step the draw followed.
     assert seen == ["asked at 0", "asked at 1", "drew"]
     assert result.draws == (scheduler.Drawn("a", "coin", "x", 1),)
+
+
+_COIN = (("heads", 1), ("tails", 1))
+_NO_DISTRIBUTION = (
+    "a written distribution is pairs of an outcome and a weight, each "
+    "weight a positive integer")
+
+
+def _flips(sampler: scheduler.Sampler, count: int) -> str:
+    """Flips a coin a number of times and returns the sides' first letters."""
+    return "".join(
+        sampler.sample("a", _COIN)[0].upper() for _ in range(count))
+
+
+def test_seeded_sampler_gives_the_draws_of_its_seed():
+    # Written out, as the schedule of a seed is in the README: a seed that
+    # found a failure must find it again under another Python.
+    assert _flips(scheduler.SeededSampler(0), 16) == "HTTTTHTHTHTHHHTT"
+    assert _flips(scheduler.SeededSampler(1), 16) == "HHTHHTTTTTHHTTTT"
+    assert _flips(scheduler.SeededSampler(0), 16) == "HTTTTHTHTHTHHHTT"
+
+
+def test_seeded_sampler_draws_by_weight():
+    sampler = scheduler.SeededSampler(7)
+    request = (("one", 1), ("two", 2), ("three", 3))
+    drawn = collections.Counter(
+        sampler.sample("a", request) for _ in range(6000))
+    # A sixth, a third and a half of 6000 draws are 1000, 2000 and 3000,
+    # with standard deviations of 29, 37 and 39. The counts of this seed
+    # are each within two of them.
+    assert drawn == {"one": 949, "two": 2042, "three": 3009}
+
+
+@pytest.mark.parametrize(
+    "request_,always",
+    [
+        ((("rare", 1), ("common", 10**12)), "common"),
+        ((("common", 10**12), ("rare", 1)), "common"),
+        ((("only", 1),), "only"),
+    ],
+    ids=["heavy-last", "heavy-first", "one-outcome"])
+def test_weight_goes_with_its_outcome(request_, always):
+    sampler = scheduler.SeededSampler(0)
+    assert {sampler.sample("a", request_) for _ in range(200)} == {always}
+
+
+def test_written_distribution_may_be_lists():
+    # As a sampler is given one that an agent built of lists.
+    sampler = scheduler.SeededSampler(0)
+    assert "".join(
+        sampler.sample("a", [["H", 1], ["T", 1]]) for _ in range(16)
+    ) == "HTTTTHTHTHTHHHTT"
+
+
+def test_seeded_sampler_draws_in_the_order_asked_whoever_asks():
+    one = scheduler.SeededSampler(3)
+    other = scheduler.SeededSampler(3)
+    # One stream for every agent. So what an agent draws depends on the
+    # draws made before it, by any agent, and with that on the schedule.
+    assert [one.sample(agent, _COIN) for agent in "aabbab"] == [
+        other.sample(agent, _COIN) for agent in "bababa"]
+
+
+def test_seeded_sampler_does_not_draw_from_the_stream_of_its_policy():
+    sides = [side for side, _ in _COIN]
+    for seed in range(20):
+        policy = scheduler.RandomPolicy(seed)
+        sampler = scheduler.SeededSampler(seed)
+        chosen = [policy.choose(sides) for _ in range(32)]
+        drawn = [sampler.sample("a", _COIN) for _ in range(32)]
+        # A search gives both the same seed. From one stream, every draw
+        # would be tied to a choice of the schedule. Apart, they are
+        # alike by chance once in 2**32.
+        assert chosen != drawn
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "coin",
+        5,
+        None,
+        (),
+        [],
+        {"heads": 1},
+        (("heads",),),
+        (("heads", 1, 2),),
+        ("h1",),
+        ({"heads": 1},),
+        (("heads", 0),),
+        (("heads", -1),),
+        (("heads", True),),
+        (("heads", 1.0),),
+        (("heads", "1"),),
+        (("heads", 1), "tails"),
+        (("heads", 1), ("tails", 0)),
+    ],
+    ids=repr)
+def test_seeded_sampler_refuses_what_is_no_written_distribution(given):
+    sampler = scheduler.SeededSampler(0)
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        sampler.sample("a", given)
+    assert str(caught.value) == (
+        f"agent 'a' cannot draw from {given!r}: {_NO_DISTRIBUTION}")
+    # And nothing was drawn for it: the next draw is the first of the seed.
+    assert _flips(sampler, 16) == "HTTTTHTHTHTHHHTT"
+
+
+def test_refusal_of_a_distribution_shows_no_more_than_the_start_of_it():
+    given = "x" * 500
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        scheduler.SeededSampler(0).sample("a", given)
+    assert str(caught.value) == (
+        f"agent 'a' cannot draw from '{'x' * 199}... (502 characters): "
+        f"{_NO_DISTRIBUTION}")
+
+
+def test_draw_from_no_written_distribution_ends_the_run():
+    coroutines = {}
+    scenario = _scenario(
+        a=_kept(_writer, coroutines), z=_kept(_flipper, coroutines))
+    # The flipper asks to draw from a word, which the sampler of the tests
+    # takes and this one does not.
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^agent 'z' cannot draw from 'coin': a written"):
+        scheduler.run(
+            scenario, scheduler.ReplayPolicy(["z"]),
+            scheduler.SeededSampler(0))
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "z": inspect.CORO_CLOSED}
+
+
+def test_replay_sampler_gives_the_draws_back_in_order():
+    held = [
+        scheduler.Drawn("a", "coin", "heads", 0),
+        scheduler.Drawn("b", "die", 6, 2),
+    ]
+    sampler = scheduler.ReplaySampler(held)
+    # Its own: what the caller does to the list afterwards changes nothing.
+    held.clear()
+    assert sampler.sample("a", "coin") == "heads"
+    assert sampler.sample("b", "die") == 6
+
+
+def test_replay_sampler_refuses_a_draw_it_does_not_hold():
+    sampler = scheduler.ReplaySampler(
+        [scheduler.Drawn("a", "coin", "heads", 0)])
+    sampler.sample("a", "coin")
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        sampler.sample("b", "coin")
+    assert str(caught.value) == (
+        "the draws end after 1 but agent 'b' asks for one more")
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.ReplaySampler([]).sample("a", "coin")
+    assert str(caught.value) == (
+        "the draws end after 0 but agent 'a' asks for one more")
+
+
+def test_replay_sampler_refuses_a_draw_that_another_agent_made():
+    sampler = scheduler.ReplaySampler([
+        scheduler.Drawn("a", "coin", "heads", 0),
+        scheduler.Drawn("a", "coin", "tails", 0),
+    ])
+    sampler.sample("a", "coin")
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        sampler.sample("b", "coin")
+    assert str(caught.value) == (
+        "draw 2 names 'a', but it is 'b' that draws")
+
+
+def test_replay_sampler_refuses_a_draw_from_something_else():
+    sampler = scheduler.ReplaySampler([
+        scheduler.Drawn("a", "coin", "heads", 0),
+        scheduler.Drawn("a", ("coin", 1), "tails", 0),
+    ])
+    sampler.sample("a", "coin")
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        sampler.sample("a", ["coin", 1])
+    # The value would be given to an agent that asked for something else,
+    # and the run would then be told from its record only at its end.
+    assert str(caught.value) == (
+        "draw 2 is from ('coin', 1), but agent 'a' asks to draw from "
+        "['coin', 1]")
+
+
+def test_refusal_of_a_draw_shows_no_more_than_the_start_of_a_request():
+    sampler = scheduler.ReplaySampler(
+        [scheduler.Drawn("a", "x" * 500, "heads", 0)])
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        sampler.sample("a", "y" * 500)
+    assert str(caught.value) == (
+        f"draw 1 is from '{'x' * 199}... (502 characters), but agent 'a' "
+        f"asks to draw from '{'y' * 199}... (502 characters)")

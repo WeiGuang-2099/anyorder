@@ -79,6 +79,10 @@ def serial_outcomes(
     agent must finish in every order: an agent that waits for a later one
     by trying again never does.
 
+    The orders are run with no sampler, so a scenario whose agents draw
+    has no serial outcomes yet: they would have to be those under the
+    draws of the run that is judged.
+
     Args:
         scenario: Whose agents to run.
         snapshot: Gives the state of a world as a value that compares
@@ -94,6 +98,7 @@ def serial_outcomes(
             deterministic, or the snapshot gives values that are not equal
             for worlds in the same state.
         TypeError: The snapshot gave a value that cannot be hashed.
+        UnsupportedAwaitError: An agent drew.
     """
     orders: dict[Hashable, list[Order]] = {}
     for order in itertools.permutations(sorted(scenario.agents)):

@@ -122,7 +122,7 @@ def take(value: Any, room: int = ROOM) -> Any:
         return Raised(
             take(value.kind, room - 2), take(value.message, room - 2))
     raise NotTakenError(
-        f"a call does not carry {_shown(value)}, of type {_name_of(kind)}")
+        f"a call does not carry {shown(value)}, of type {_name_of(kind)}")
 
 
 def _all_plain(parts: Iterable[Any]) -> bool:
@@ -152,8 +152,11 @@ def _too_deep() -> NotTakenError:
         f"file would have more than {_LINE_LEVELS} levels of lists and objects")
 
 
-def _shown(value: Any) -> str:
-    """Returns a value as a refusal names it, cut where it is long."""
+def shown(value: Any) -> str:
+    """Returns a value as a refusal names it, cut where it is long.
+
+    For any value, also one that no call carries.
+    """
     try:
         shown = repr(value)
     except Exception:

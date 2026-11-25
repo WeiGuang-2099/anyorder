@@ -626,3 +626,22 @@ def test_snapshot_that_cannot_be_hashed_is_refused():
         oracle.serial_outcomes(
             oversell.naive(),
             lambda inventory: (inventory.stock, inventory.orders))
+
+
+def test_serial_orders_of_a_scenario_that_draws_are_not_run():
+    async def writer(ctx: scheduler.AgentContext) -> None:
+        value = await ctx.draw((("left", 1), ("right", 1)))
+        await ctx.call("put", cell="x", value=value)
+
+    scenario = scheduler.Scenario(
+        name="drawn-cells",
+        make_world=_Cells,
+        agents={"a": writer, "b": writer},
+        invariants=(),
+    )
+    # The serial orders must be run under the draws of the run they judge,
+    # and nothing gives those yet to an order that asks for other draws.
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError,
+            match="^agent 'a' awaited a draw, and the run has no sampler$"):
+        oracle.serial_outcomes(scenario, _cells)

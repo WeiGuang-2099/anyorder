@@ -489,3 +489,40 @@ def test_shrink_refuses_a_smaller_run_that_does_not_replay():
             scheduler.ReplayDivergenceError,
             match="replayed to a different trace"):
         shrink.shrink(scenario, failure)
+
+
+def test_run_that_drew_is_not_shrunk():
+    built = []
+
+    class Roll(_Roll):
+        def __init__(self) -> None:
+            super().__init__()
+            built.append(self)
+
+    async def caller(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw((("go", 1),))
+        await ctx.call("call_out", name=ctx.name)
+
+    scenario = scheduler.Scenario(
+        name="drawn-roll",
+        make_world=Roll,
+        agents={"a": caller, "b": caller},
+        invariants=(
+            scheduler.Invariant(
+                "silence", lambda roll: "somebody called", every_step=False),
+        ),
+    )
+    failure = scheduler.run(
+        scenario, scheduler.RandomPolicy(0), scheduler.SeededSampler(0))
+    assert failure.violation is not None and len(failure.draws) == 2
+    built.clear()
+    # Its draws would have to be held fixed while its schedule changes,
+    # and nothing says yet which draw an agent is given once it has read
+    # something else.
+    with pytest.raises(
+            ValueError,
+            match="^the run made draws, and a run that drew is not shrunk "
+                  "yet$"):
+        shrink.shrink(scenario, failure)
+    # Refused before anything was run.
+    assert not built

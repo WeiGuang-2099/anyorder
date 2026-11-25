@@ -26,8 +26,10 @@ Nothing here reads the clock, starts a thread or uses an event loop.
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import functools
+import itertools
 import operator
 import random
 from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
@@ -57,10 +59,11 @@ class UnsupportedAwaitError(SchedulerError):
 
 
 class UnsupportedValueError(SchedulerError):
-    """A value is not one a call carries.
+    """A value cannot be used where it was given.
 
-    It is an argument or a result of a call, or what a draw asked for or
-    was given.
+    An argument or a result of a call, or what a draw asked for or was
+    given, is not a value a call carries. Or a sampler was asked to draw
+    from what it does not draw from.
     """
 
 
@@ -314,6 +317,99 @@ class Sampler(Protocol):
         Returns:
             The sample, a value a call carries.
         """
+
+
+class SeededSampler:
+    """Draws from written distributions with a seeded generator.
+
+    A written distribution is a tuple or a list of pairs, each an outcome
+    and its weight. A weight is a positive integer, so that every chance
+    is an exact fraction: ((True, 1), (False, 3)) gives True one time in
+    four.
+
+    The draws come from one stream, in the order they are asked for. So
+    what an agent draws depends on how many draws were made before, by
+    any agent: under another schedule the same seed can give an agent
+    another sample where it has seen and done the same.
+    """
+
+    def __init__(self, seed: int) -> None:
+        self._seed = seed
+        self._rng: random.Random | None = None
+
+    def sample(self, agent: str, request: Any) -> Any:
+        """Returns one outcome of a written distribution.
+
+        Raises:
+            UnsupportedValueError: The request is no written distribution.
+                Nothing is drawn for it.
+        """
+        bounds = list(itertools.accumulate(_weights(agent, request)))
+        if self._rng is None:
+            # Only now: most runs make no draw. And seeded with a text: a
+            # policy of the same seed chooses from the stream of the
+            # number, and a draw must not be tied to a choice.
+            self._rng = random.Random(f"anyorder draws {self._seed}")
+        point = self._rng.randrange(bounds[-1])
+        return request[bisect.bisect_right(bounds, point)][0]
+
+
+class ReplaySampler:
+    """Gives recorded draws back in order and refuses to leave them."""
+
+    def __init__(self, draws: Sequence[Drawn]) -> None:
+        self._draws = tuple(draws)
+        self._position = 0
+
+    def sample(self, agent: str, request: Any) -> Any:
+        if self._position == len(self._draws):
+            raise ReplayDivergenceError(
+                f"the draws end after {self._position} but agent {agent!r} "
+                "asks for one more")
+        held = self._draws[self._position]
+        if held.agent != agent:
+            raise ReplayDivergenceError(
+                f"draw {self._position + 1} names {held.agent!r}, but it is "
+                f"{agent!r} that draws")
+        if held.request != request:
+            # Here, and not when the run is over: the agent would go on
+            # with a sample of something it did not ask for.
+            raise ReplayDivergenceError(
+                f"draw {self._position + 1} is from "
+                f"{values.shown(held.request)}, but agent {agent!r} asks to "
+                f"draw from {values.shown(request)}")
+        self._position += 1
+        return held.value
+
+
+def _weights(agent: str, request: Any) -> list[int]:
+    """Returns the weights of a written distribution, in its order.
+
+    Raises:
+        UnsupportedValueError: The request is no written distribution.
+    """
+    if not _is_written(request):
+        raise UnsupportedValueError(
+            f"agent {agent!r} cannot draw from {values.shown(request)}: a "
+            "written distribution is pairs of an outcome and a weight, each "
+            "weight a positive integer")
+    return [weight for _, weight in request]
+
+
+def _is_written(request: Any) -> bool:
+    """Says whether a request is a written distribution.
+
+    A weight is an integer and nothing that passes for one: True is no
+    weight.
+    """
+    if not (type(request) is tuple or type(request) is list) or not request:
+        return False
+    for pair in request:
+        if not (type(pair) is tuple or type(pair) is list) or len(pair) != 2:
+            return False
+        if type(pair[1]) is not int or pair[1] < 1:
+            return False
+    return True
 
 
 # By agent: its coroutine, the tool and the arguments of the call it waits

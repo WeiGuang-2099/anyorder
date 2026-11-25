@@ -92,14 +92,23 @@ def shrink(
         The smallest failing run found and how many candidates were run.
 
     Raises:
-        ValueError: The run broke no invariant.
+        ValueError: The run broke no invariant, or it made draws. A run
+            that drew is not shrunk yet: its draws would have to be held
+            fixed while its schedule changes, and nothing says which draw
+            an agent is given once it has read something else. Nothing
+            has run.
         ReplayDivergenceError: The given run or a smaller one did not
             replay to the same trace. Either the run is not one of this
             scenario, or the scenario is not deterministic.
+        UnsupportedAwaitError: An agent drew under a candidate, where it
+            did not in the given run.
     """
     if result.violation is None:
         raise ValueError(
             "the run broke no invariant, so there is nothing to shrink")
+    if result.draws:
+        raise ValueError(
+            "the run made draws, and a run that drew is not shrunk yet")
     _confirm(scenario, result)
     candidates = 0
     orders = _orders(result.schedule)

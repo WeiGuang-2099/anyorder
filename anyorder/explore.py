@@ -13,9 +13,10 @@ class Failure:
     """A run that broke an invariant.
 
     Attributes:
-        seed: The seed whose random policy produced the run.
-        result: The failing run. Its schedule replays the failure without
-            the seed.
+        seed: The seed whose random policy and whose draws produced the
+            run.
+        result: The failing run. Its schedule and its draws replay the
+            failure without the seed.
     """
 
     seed: int
@@ -27,8 +28,10 @@ def explore(
 ) -> Failure | None:
     """Runs one random schedule per seed until an invariant breaks.
 
-    A failure is replayed from its schedule before it is returned, so a
-    reported failure is always one that can be reproduced.
+    Agents that draw are given fresh draws for each seed, from a seeded
+    sampler. A failure is replayed from its schedule and its draws before
+    it is returned, so a reported failure is always one that can be
+    reproduced.
 
     Args:
         scenario: What to run.
@@ -40,12 +43,16 @@ def explore(
     Raises:
         ReplayDivergenceError: A failing run did not replay to the same
             trace, which means the scenario is not deterministic.
+        UnsupportedValueError: An agent asked to draw from something that
+            is no written distribution.
     """
     for seed in seeds:
-        result = scheduler.run(scenario, scheduler.RandomPolicy(seed))
+        result = scheduler.run(
+            scenario, scheduler.RandomPolicy(seed),
+            scheduler.SeededSampler(seed))
         if result.violation is None:
             continue
-        if replay(scenario, result.schedule) != result:
+        if replay(scenario, result.schedule, result.draws) != result:
             raise scheduler.ReplayDivergenceError(
                 f"seed {seed} broke an invariant of {scenario.name!r}, but "
                 "its schedule replayed to a different trace")
@@ -66,6 +73,10 @@ def exhaust(scenario: scheduler.Scenario) -> Iterator[scheduler.RunResult]:
     schedule, and the number of schedules can grow exponentially with
     the number of calls and factorially with the number of agents.
 
+    The runs have no sampler, so a scenario whose agents draw is not
+    searched: its runs would have to share one table of draws, and nothing
+    here keeps one yet.
+
     Args:
         scenario: What to run.
 
@@ -78,6 +89,7 @@ def exhaust(scenario: scheduler.Scenario) -> Iterator[scheduler.RunResult]:
             scenario is not deterministic: state outlives a run, or an
             argument, a tool's result or an invariant's message does not
             compare equal from run to run.
+        UnsupportedAwaitError: An agent drew.
     """
     prefix: tuple[str, ...] | None = ()
     while prefix is not None:
@@ -97,27 +109,50 @@ def exhaust(scenario: scheduler.Scenario) -> Iterator[scheduler.RunResult]:
 
 
 def replay(
-    scenario: scheduler.Scenario, schedule: Sequence[str]
+    scenario: scheduler.Scenario,
+    schedule: Sequence[str],
+    draws: Sequence[scheduler.Drawn] = (),
 ) -> scheduler.RunResult:
-    """Runs a scenario under a recorded schedule.
+    """Runs a scenario under a recorded schedule and recorded draws.
 
     Args:
         scenario: What to run.
         schedule: The agent to choose at each step.
+        draws: The draws of the run, in the order they were made. Each is
+            given back to the agent that made it. A run that drew nothing
+            has none.
 
     Returns:
-        The run's trace and the first violated invariant, if any.
+        The run's trace, its draws and the first violated invariant, if
+        any.
 
     Raises:
         ReplayDivergenceError: The schedule names an agent that is not
             waiting, ends while agents can still run, or has steps left
-            when the run ends.
+            when the run ends. Or an agent asks for a draw that is not
+            the next of those given: there is none left, another agent
+            made it, or it was drawn from something else. Or the run
+            ends with draws left, or made one after another step than
+            the draw says.
     """
-    result = scheduler.run(scenario, scheduler.ReplayPolicy(schedule))
+    result = scheduler.run(
+        scenario, scheduler.ReplayPolicy(schedule),
+        scheduler.ReplaySampler(draws))
     if len(result.steps) != len(schedule):
         raise scheduler.ReplayDivergenceError(
             f"the run ended after {len(result.steps)} steps but the "
             f"schedule has {len(schedule)}")
+    if len(result.draws) != len(draws):
+        raise scheduler.ReplayDivergenceError(
+            f"the run made {len(result.draws)} draws but {len(draws)} were "
+            "given")
+    for number, (made, held) in enumerate(zip(result.draws, draws), start=1):
+        # The sampler is not told where a run stands, so this is seen
+        # only now.
+        if made.step != held.step:
+            raise scheduler.ReplayDivergenceError(
+                f"draw {number} was made after {made.step} steps, not after "
+                f"{held.step}")
     return result
 
 
