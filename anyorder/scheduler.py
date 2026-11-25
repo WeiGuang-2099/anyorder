@@ -35,7 +35,8 @@ import functools
 import itertools
 import operator
 import random
-from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
+from collections.abc import (
+    Callable, Coroutine, Generator, Hashable, Mapping, Sequence)
 from typing import Any, Protocol
 
 from anyorder import values
@@ -59,6 +60,10 @@ class UnsupportedAwaitError(SchedulerError):
     That is anything but a tool call and a draw, and a draw in a run that
     has no sampler.
     """
+
+
+class MissingSnapshotError(SchedulerError):
+    """A scenario was asked for the state of its world and gives none."""
 
 
 class UnsupportedValueError(SchedulerError):
@@ -179,12 +184,19 @@ class Scenario:
             are listed in.
         invariants: What must stay true of the world. Each says when it
             must hold.
+        snapshot: Gives the state of a world as a value that can be
+            hashed and that is equal for two worlds in the same state,
+            such as a tuple of numbers and strings. It says everything
+            of the world that a later call or a later check can go by:
+            two worlds with one state go on alike. A scenario that is
+            never asked for the state of its world needs none.
     """
 
     name: str
     make_world: Callable[[], Any]
     agents: Mapping[str, Agent]
     invariants: Sequence[Invariant]
+    snapshot: Callable[[Any], Hashable] | None = None
 
 
 # Defined with the values a call carries, of which it is one.
@@ -281,11 +293,19 @@ class Moment:
     the run's own records, which nobody is to change.
     """
 
-    __slots__ = ("_pending", "_steps", "_draws", "_violation")
+    __slots__ = (
+        "_scenario", "_world", "_pending", "_steps", "_draws", "_violation")
 
     def __init__(
-        self, pending: _Pending, steps: list[Step], draws: list[Drawn]
+        self,
+        scenario: Scenario,
+        world: Any,
+        pending: _Pending,
+        steps: list[Step],
+        draws: list[Drawn],
     ) -> None:
+        self._scenario = scenario
+        self._world = world
         self._pending = pending
         self._steps = steps
         self._draws = draws
@@ -329,6 +349,37 @@ class Moment:
         agents are started before the fresh world is asked.
         """
         return self._violation
+
+    def state(self) -> Hashable:
+        """Returns the state of the world, as the scenario's snapshot gives it.
+
+        Raises:
+            MissingSnapshotError: The scenario has no snapshot.
+            TypeError: The snapshot gave a value that cannot be hashed.
+        """
+        return state_of(self._scenario, self._world)
+
+
+def state_of(scenario: Scenario, world: Any) -> Hashable:
+    """Returns the state of a scenario's world, as its snapshot gives it.
+
+    Raises:
+        MissingSnapshotError: The scenario has no snapshot.
+        TypeError: The snapshot gave a value that cannot be hashed. A
+            state is held against other states and looked up by.
+    """
+    if scenario.snapshot is None:
+        raise MissingSnapshotError(
+            f"the scenario {scenario.name!r} has no snapshot to give the "
+            "state of its world")
+    state = scenario.snapshot(world)
+    try:
+        hash(state)
+    except TypeError as error:
+        raise TypeError(
+            f"the snapshot of {scenario.name!r} gave {state!r}, which "
+            f"cannot be hashed: {error}") from None
+    return state
 
 
 class Policy(Protocol):
@@ -563,7 +614,7 @@ def run(
     pending: _Pending = {}
     steps: list[Step] = []
     draws: list[Drawn] = []
-    moment = Moment(pending, steps, draws)
+    moment = Moment(scenario, world, pending, steps, draws)
     draw = functools.partial(_drawn, sampler, draws, steps, moment)
     try:
         for name in names:

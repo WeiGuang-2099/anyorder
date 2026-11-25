@@ -110,4 +110,5 @@ def _scenario(
         invariants=(
             scheduler.Invariant("no-line-lost", no_line_lost, every_step=True),
         ),
+        snapshot=snapshot,
     )

@@ -6,8 +6,8 @@ that no serial order leaves: then no way of taking turns explains what the
 agents did together. An invariant needs a rule about one world. This oracle
 needs none, and it sees a lost update that breaks no invariant.
 
-What a run leaves is what a snapshot function gives of its world once every
-agent has finished, and only that is compared. What an agent read or was
+What a run leaves is what the scenario's snapshot gives of its world once
+every agent has finished, and only that is compared. What an agent read or was
 told is not, so an agent's conclusion counts only where a tool call wrote
 it to the world. A failure that the serial orders share is not seen either:
 the invariants are the oracle for that.
@@ -36,15 +36,13 @@ class SerialOutcomes:
     """What the serial orders of a scenario's agents leave.
 
     Attributes:
-        scenario: Whose agents were run one after another.
-        snapshot: Gives the state of a world. A run is judged with the same
-            one.
+        scenario: Whose agents were run one after another. A run is judged
+            with its snapshot.
         orders: The serial orders by their outcome, which is the state of
             the world once every agent has finished.
     """
 
     scenario: scheduler.Scenario
-    snapshot: Snapshot
     orders: Mapping[Hashable, tuple[Order, ...]]
 
 
@@ -67,9 +65,7 @@ class Verdict:
         return not self.orders
 
 
-def serial_outcomes(
-    scenario: scheduler.Scenario, snapshot: Snapshot
-) -> SerialOutcomes:
+def serial_outcomes(scenario: scheduler.Scenario) -> SerialOutcomes:
     """Runs every serial order of a scenario's agents.
 
     Each order is run twice, and the two runs must give the same trace and
@@ -84,10 +80,8 @@ def serial_outcomes(
     draws of the run that is judged.
 
     Args:
-        scenario: Whose agents to run.
-        snapshot: Gives the state of a world as a value that compares
-            equal for worlds in the same state and can be hashed, such as
-            a tuple. It decides what counts as ending the same.
+        scenario: Whose agents to run. Its snapshot gives the state of a
+            world, and so decides what counts as ending the same.
 
     Returns:
         The serial orders, in name order, by the outcome they end in.
@@ -97,15 +91,21 @@ def serial_outcomes(
             and the same outcome twice. Either the scenario is not
             deterministic, or the snapshot gives values that are not equal
             for worlds in the same state.
+        MissingSnapshotError: The scenario has no snapshot. Nothing has
+            run.
         TypeError: The snapshot gave a value that cannot be hashed.
         UnsupportedAwaitError: An agent drew.
     """
+    if scenario.snapshot is None:
+        raise scheduler.MissingSnapshotError(
+            f"the scenario {scenario.name!r} has no snapshot, so its runs "
+            "leave no outcome to compare")
     orders: dict[Hashable, list[Order]] = {}
     for order in itertools.permutations(sorted(scenario.agents)):
         run, outcome = _observe(
-            scenario, snapshot,
+            scenario,
             functools.partial(scheduler.run, policy=_SerialPolicy(order)))
-        again = _replayed(scenario, snapshot, run)
+        again = _replayed(scenario, run)
         if again != outcome:
             raise scheduler.ReplayDivergenceError(
                 f"the serial order {' '.join(order)!r} of {scenario.name!r} "
@@ -113,7 +113,7 @@ def serial_outcomes(
                 f"then {again!r}")
         orders.setdefault(outcome, []).append(order)
     return SerialOutcomes(
-        scenario, snapshot,
+        scenario,
         {outcome: tuple(found) for outcome, found in orders.items()})
 
 
@@ -142,10 +142,10 @@ def judge(serial: SerialOutcomes, result: scheduler.RunResult) -> Verdict:
         TypeError: The snapshot gave a value that cannot be hashed.
     """
     scenario = serial.scenario
-    outcome = _replayed(scenario, serial.snapshot, result)
+    outcome = _replayed(scenario, result)
     orders = serial.orders.get(outcome, ())
     if not orders:
-        again = _replayed(scenario, serial.snapshot, result)
+        again = _replayed(scenario, result)
         if again != outcome:
             raise scheduler.ReplayDivergenceError(
                 f"the schedule {' '.join(result.schedule)!r} of "
@@ -169,14 +169,12 @@ class _SerialPolicy:
 
 def _observe(
     scenario: scheduler.Scenario,
-    snapshot: Snapshot,
     run: Callable[[scheduler.Scenario], scheduler.RunResult],
 ) -> tuple[scheduler.RunResult, Hashable]:
     """Makes one run and returns it with the state its world ends in.
 
     Args:
-        scenario: What to run.
-        snapshot: Gives the state of a world.
+        scenario: What to run. Its snapshot gives the state of a world.
         run: Makes the run, given a copy of the scenario that keeps the
             world it builds.
     """
@@ -190,20 +188,11 @@ def _observe(
     result = run(dataclasses.replace(scenario, make_world=make_world))
     # One world: the scheduler builds it once for a run.
     (world,) = worlds
-    outcome = snapshot(world)
-    try:
-        hash(outcome)
-    except TypeError as error:
-        raise TypeError(
-            f"the snapshot of {scenario.name!r} gave {outcome!r}, which "
-            f"cannot be hashed: {error}") from None
-    return result, outcome
+    return result, scheduler.state_of(scenario, world)
 
 
 def _replayed(
-    scenario: scheduler.Scenario,
-    snapshot: Snapshot,
-    result: scheduler.RunResult,
+    scenario: scheduler.Scenario, result: scheduler.RunResult
 ) -> Hashable:
     """Replays a run and returns the state its world ends in.
 
@@ -221,5 +210,5 @@ def _replayed(
                 f"{scenario.name!r} replayed to a different trace")
         return replayed
 
-    _, outcome = _observe(scenario, snapshot, replay)
+    _, outcome = _observe(scenario, replay)
     return outcome

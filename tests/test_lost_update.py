@@ -169,7 +169,7 @@ def _failed(
     scenario: scheduler.Scenario, runs: list[scheduler.RunResult]
 ) -> list[scheduler.RunResult]:
     """Keeps the runs that end as no serial order ends."""
-    serial = oracle.serial_outcomes(scenario, lost_update.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     return [run for run in runs if oracle.judge(serial, run).failed]
 
 
@@ -320,7 +320,7 @@ def test_naive_editors_fail_the_oracle_exactly_where_a_line_is_lost(editors):
     # so a serial order ends at version n with the lines in its own order.
     # A run that lost a line ends with fewer lines than n.
     scenario = lost_update.naive(editors=editors)
-    serial = oracle.serial_outcomes(scenario, lost_update.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     assert serial.orders == {
         (editors, order): (order,)
         for order in itertools.permutations(scenario.agents)}
@@ -343,7 +343,7 @@ def test_two_cas_editors_have_6_schedules_and_4_hold_a_refused_write():
     # still ends as a serial order ends: both lines, in the order the
     # writes went through.
     scenario = _control()
-    serial = oracle.serial_outcomes(scenario, lost_update.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     assert collections.Counter(len(run.steps) for run in runs) == {4: 2, 6: 4}
     assert collections.Counter(
@@ -376,7 +376,7 @@ def test_three_cas_editors_have_498_schedules_and_all_pass():
     # 18 + 120 + 360 = 498 schedules. No write is refused in the 3! = 6
     # serial orders, and at least one is in each of the other 492.
     scenario = _control(editors=3)
-    serial = oracle.serial_outcomes(scenario, lost_update.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     assert len(runs) == 498
     assert collections.Counter(
@@ -408,7 +408,7 @@ def test_longest_run_of_the_control_makes_n_times_n_plus_1_calls(editors):
 @pytest.mark.parametrize("editors", [2, 3, 5])
 def test_control_passes_both_oracles_under_random_schedules(editors):
     scenario = _control(editors)
-    serial = oracle.serial_outcomes(scenario, lost_update.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     for seed in range(200):
         run = scheduler.run(scenario, scheduler.RandomPolicy(seed))
         assert run.violation is None
@@ -544,7 +544,7 @@ def test_editor_that_tries_again_without_reading_never_ends():
     # orders end, and a search is the first to meet such a run: here it is
     # cut at the 20 calls the test allows.
     scenario = _edited_by(_stubborn_editor)
-    serial = oracle.serial_outcomes(scenario, lost_update.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     assert set(serial.orders) == {(2, (_E1, _E2)), (2, (_E2, _E1))}
     with pytest.raises(_StepLimitError, match="'write_if'"):
         explore.replay(scenario, (_E1, _E2, _E1) + (_E2,) * 18)

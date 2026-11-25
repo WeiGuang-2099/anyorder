@@ -18,7 +18,9 @@ from anyorder import explore
 from anyorder import oracle
 from anyorder import scheduler
 from anyorder import tracefile
+from anyorder.scenarios import lost_update
 from anyorder.scenarios import oversell
+from anyorder.scenarios import write_skew
 
 _B1_B2 = ("buyer-1", "buyer-2")
 _B2_B1 = ("buyer-2", "buyer-1")
@@ -41,6 +43,13 @@ class _Cells:
 
 def _cells(cells: _Cells) -> tuple[str | None, str | None]:
     return cells.x, cells.y
+
+
+def _seen_by(
+    scenario: scheduler.Scenario, snapshot: oracle.Snapshot
+) -> scheduler.Scenario:
+    """The scenario with a snapshot of the test's own."""
+    return dataclasses.replace(scenario, snapshot=snapshot)
 
 
 class _SwapInventory(oversell.Inventory):
@@ -202,7 +211,7 @@ def test_snapshot_of_an_inventory_is_its_stock_and_its_orders_as_placed():
 def test_serial_orders_of_two_buyers_of_two_units_sell_both():
     # One after the other, the first buyer reads 2 and writes 1 and the
     # second reads 1 and writes 0. The orders are placed in that order.
-    serial = oracle.serial_outcomes(oversell.naive(stock=2), oversell.snapshot)
+    serial = oracle.serial_outcomes(oversell.naive(stock=2))
     assert serial.orders == {
         (0, _B1_B2): (_B1_B2,),
         (0, _B2_B1): (_B2_B1,),
@@ -214,7 +223,7 @@ def test_serial_outcome_names_every_order_that_ends_in_it():
     # orders that start with the same buyer end alike.
     b1, b2, b3 = "buyer-1", "buyer-2", "buyer-3"
     serial = oracle.serial_outcomes(
-        oversell.naive(buyers=3), oversell.snapshot)
+        oversell.naive(buyers=3))
     assert serial.orders == {
         (0, (b1,)): ((b1, b2, b3), (b1, b3, b2)),
         (0, (b2,)): ((b2, b1, b3), (b2, b3, b1)),
@@ -228,7 +237,7 @@ def test_two_buyers_of_one_unit_fail_exactly_where_they_oversell():
     # as in the serial order that buyer starts. In 12 both read 1 and both
     # order, and no serial order leaves two orders.
     scenario = oversell.naive()
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     failed = _failed(serial, runs)
     assert (len(runs), len(failed)) == (16, 12)
@@ -241,7 +250,7 @@ def test_three_buyers_of_one_unit_fail_exactly_where_they_oversell():
     # buyer's order, as in a serial order it starts. In 684 two or three
     # buyers order, and no serial order leaves more than one order.
     scenario = oversell.naive(buyers=3)
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     failed = _failed(serial, runs)
     assert (len(runs), len(failed)) == (702, 684)
@@ -262,7 +271,7 @@ def test_two_buyers_of_two_units_lose_an_update_in_12_of_20_schedules():
     # whichever way round they were placed, a serial order places them so.
     # No schedule oversells: 2 orders against a stock of 2.
     scenario = oversell.naive(stock=2)
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     failed = _failed(serial, runs)
     assert (len(runs), len(failed)) == (20, 12)
@@ -280,7 +289,7 @@ def test_run_is_judged_by_the_state_it_leaves_and_not_by_what_was_read():
     # placed as in the one that buyer-2 starts. No serial order gives both,
     # and the run passes: the state it leaves is that of the second.
     scenario = oversell.naive(stock=2)
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     run = explore.replay(scenario, (
         "buyer-1", "buyer-1", "buyer-2", "buyer-2", "buyer-2", "buyer-1"))
     assert [
@@ -297,7 +306,7 @@ def test_every_schedule_of_the_control_ends_as_its_own_serial_order(
     # a serial order. This shows that the oracle knows every serial order.
     # It shows nothing about interleavings: the swapping buyers do that.
     scenario = oversell.atomic(stock=stock, buyers=buyers)
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     assert len(runs) == len(list(itertools.permutations(scenario.agents)))
     for run in runs:
@@ -324,7 +333,7 @@ def test_buyers_that_swap_and_read_again_pass_under_every_schedule(
     # order. Each of those runs still ends as a serial order ends: the
     # stock at 0, and the orders of the buyers whose swaps went through.
     scenario = _swapping(stock)
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     assert len(runs) == schedules
     assert sum(
@@ -349,7 +358,7 @@ def test_writes_that_no_serial_order_leaves_fail_without_any_read():
     # order that is the second agent for both cells. Of the
     # 4! / (2! 2!) = 6 schedules, a b b a and b a a b leave one cell to
     # each agent. No agent reads, so only the world shows it.
-    serial = oracle.serial_outcomes(scenario, _cells)
+    serial = oracle.serial_outcomes(_seen_by(scenario, _cells))
     assert serial.orders == {
         ("b", "b"): (("a", "b"),),
         ("a", "a"): (("b", "a"),),
@@ -372,7 +381,7 @@ def test_reads_that_no_serial_order_gives_are_not_seen():
     # and the give, 0 and 0. Every run ends with x at 0 and y at 1, so all
     # six pass: the auditor leaves nothing in the world to judge.
     scenario = _audit(files=False)
-    serial = oracle.serial_outcomes(scenario, _ledger)
+    serial = oracle.serial_outcomes(_seen_by(scenario, _ledger))
     runs = _runs(scenario)
     reads = collections.Counter(
         tuple(
@@ -389,7 +398,7 @@ def test_reads_that_are_written_to_the_world_are_seen():
     # when it reads both between the take and the give, and the give and
     # the filing then come in either order: 2 schedules.
     scenario = _audit(files=True)
-    serial = oracle.serial_outcomes(scenario, _ledger)
+    serial = oracle.serial_outcomes(_seen_by(scenario, _ledger))
     assert set(serial.orders) == {(0, 1, 1)}
     runs = _runs(scenario)
     assert len(runs) == 10
@@ -415,7 +424,7 @@ def test_failure_that_every_serial_order_shares_is_not_seen():
     # Buyers that do not look at the stock oversell one after the other
     # too, so all 4! / (2! 2!) = 6 schedules end as a serial order ends.
     # The invariant is the oracle for this.
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     assert len(runs) == 6
     assert all(run.violation is not None for run in runs)
@@ -434,7 +443,7 @@ def test_agents_that_make_no_call_end_as_every_serial_order():
         invariants=(),
     )
     orders = (("a", "b"), ("b", "a"))
-    serial = oracle.serial_outcomes(scenario, _cells)
+    serial = oracle.serial_outcomes(_seen_by(scenario, _cells))
     assert serial.orders == {(None, None): orders}
     assert oracle.judge(serial, scheduler.RunResult((), None)) == (
         oracle.Verdict((None, None), orders))
@@ -443,13 +452,13 @@ def test_agents_that_make_no_call_end_as_every_serial_order():
 def test_each_serial_order_is_run_twice():
     # 3! = 6 orders, each run and replayed.
     scenario, built = _counted(oversell.naive(buyers=3))
-    oracle.serial_outcomes(scenario, oversell.snapshot)
+    oracle.serial_outcomes(scenario)
     assert len(built) == 12
 
 
 def test_passing_run_is_replayed_once_and_failing_run_twice():
     scenario, built = _counted(oversell.naive(stock=2))
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     passing = explore.replay(scenario, _ONE_THEN_THE_OTHER)
     failing = explore.replay(scenario, _BOTH_READ_FIRST)
     built.clear()
@@ -464,7 +473,7 @@ def test_failure_keeps_its_verdict_through_a_trace_file():
     # The file holds no verdict and no violation. The verdict is worked out
     # again from the run that the file replays to.
     scenario = oversell.naive(stock=2)
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     run = explore.replay(scenario, _BOTH_READ_FIRST)
     saved = tracefile.loads(tracefile.dumps(scenario, run))
     assert saved.violation is None
@@ -479,7 +488,7 @@ def test_judge_refuses_a_run_of_another_scenario():
     # run is held against its steps as it is replayed, so it is refused
     # at the first call that is another: buyer-1 read 1 and not 2, and
     # waits to write 0.
-    serial = oracle.serial_outcomes(oversell.naive(), oversell.snapshot)
+    serial = oracle.serial_outcomes(oversell.naive())
     run = explore.replay(oversell.naive(stock=2), _BOTH_READ_FIRST)
     with pytest.raises(scheduler.ReplayDivergenceError) as caught:
         oracle.judge(serial, run)
@@ -496,7 +505,7 @@ def test_judge_refuses_a_run_of_another_scenario_that_would_pass():
     # and 2 in one and 2 and 1 in the other, and so do the writes that
     # follow them.
     serial = oracle.serial_outcomes(
-        oversell.naive(stock=2), oversell.snapshot)
+        oversell.naive(stock=2))
     run = explore.replay(oversell.naive(stock=3), _ONE_THEN_THE_OTHER)
     with pytest.raises(scheduler.ReplayDivergenceError) as caught:
         oracle.judge(serial, run)
@@ -514,7 +523,8 @@ def test_judge_refuses_a_run_before_it_asks_the_snapshot_of_its_world():
     # not written for two orders. The run is refused for what it is, not
     # a run of this scenario, and the snapshot's own error does not hide
     # that.
-    serial = oracle.serial_outcomes(oversell.naive(), buyer_of_the_unit)
+    serial = oracle.serial_outcomes(
+        _seen_by(oversell.naive(), buyer_of_the_unit))
     run = explore.replay(oversell.naive(stock=2), _BOTH_READ_FIRST)
     with pytest.raises(
             scheduler.ReplayDivergenceError,
@@ -536,7 +546,7 @@ def test_judge_refuses_a_run_before_it_asks_the_snapshot_of_its_world():
 
 def test_judge_refuses_a_run_whose_violation_was_taken_out():
     scenario = oversell.naive()
-    serial = oracle.serial_outcomes(scenario, oversell.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     run = explore.replay(scenario, _BOTH_READ_FIRST)
     assert run.violation is not None
     with pytest.raises(
@@ -545,7 +555,7 @@ def test_judge_refuses_a_run_whose_violation_was_taken_out():
 
 
 def test_judge_refuses_a_schedule_the_run_leaves():
-    serial = oracle.serial_outcomes(oversell.naive(), oversell.snapshot)
+    serial = oracle.serial_outcomes(oversell.naive())
     # With one unit buyer-2 reads 0 and makes no second call: the run has
     # four steps. Given one of them once more, the schedule is longer
     # than the run, and without the last it is shorter.
@@ -572,7 +582,7 @@ def test_judge_refuses_a_schedule_the_run_leaves():
 
 def test_judge_refuses_a_failure_that_ends_otherwise_when_run_again():
     scenario, snapshot = _wasteful(in_trace=False)
-    serial = oracle.serial_outcomes(scenario, snapshot)
+    serial = oracle.serial_outcomes(_seen_by(scenario, snapshot))
     run = explore.replay(scenario, _BOTH_READ_FIRST)
     # The trace replays: only the state tells one run from the next.
     assert explore.replay(scenario, _BOTH_READ_FIRST) == run
@@ -584,7 +594,7 @@ def test_judge_refuses_a_failure_that_ends_otherwise_when_run_again():
 
 def test_judge_refuses_a_failure_that_replays_otherwise_when_run_again():
     scenario, snapshot = _wasteful(in_trace=True)
-    serial = oracle.serial_outcomes(scenario, snapshot)
+    serial = oracle.serial_outcomes(_seen_by(scenario, snapshot))
     # The run makes the first write that changes nothing. The first replay
     # makes the second and gives the same trace. The replay made before
     # the failure is reported makes the third, and its last order is
@@ -601,7 +611,7 @@ def test_judge_takes_a_passing_run_of_a_world_that_leaks_elsewhere():
     # loses none. This snapshot leaves the orders out, so both serial
     # orders end alike.
     scenario, snapshot = _wasteful(in_trace=False)
-    serial = oracle.serial_outcomes(scenario, snapshot)
+    serial = oracle.serial_outcomes(_seen_by(scenario, snapshot))
     run = explore.replay(scenario, _ONE_THEN_THE_OTHER)
     assert oracle.judge(serial, run) == oracle.Verdict(
         (0, 0), (_B1_B2, _B2_B1))
@@ -630,7 +640,7 @@ def test_serial_outcomes_refuse_a_state_that_outlives_a_run():
     with pytest.raises(
             scheduler.ReplayDivergenceError,
             match="serial order 'a' of 'shared-log' ended in another state"):
-        oracle.serial_outcomes(scenario, lambda log: len(entries))
+        oracle.serial_outcomes(_seen_by(scenario, lambda log: len(entries)))
 
 
 def test_serial_outcomes_refuse_a_serial_order_that_does_not_replay():
@@ -652,15 +662,15 @@ def test_serial_outcomes_refuse_a_serial_order_that_does_not_replay():
     with pytest.raises(
             scheduler.ReplayDivergenceError,
             match="schedule 'a' of 'leaky' replayed to a different trace"):
-        oracle.serial_outcomes(scenario, lambda counter: None)
+        oracle.serial_outcomes(_seen_by(scenario, lambda counter: None))
 
 
 def test_snapshot_that_cannot_be_hashed_is_refused():
     # The world's own list, which the world goes on to change.
     with pytest.raises(TypeError, match="cannot be hashed"):
-        oracle.serial_outcomes(
+        oracle.serial_outcomes(_seen_by(
             oversell.naive(),
-            lambda inventory: (inventory.stock, inventory.orders))
+            lambda inventory: (inventory.stock, inventory.orders)))
 
 
 def test_serial_orders_of_a_scenario_that_draws_are_not_run():
@@ -679,7 +689,7 @@ def test_serial_orders_of_a_scenario_that_draws_are_not_run():
     with pytest.raises(
             scheduler.UnsupportedAwaitError,
             match="^agent 'a' awaited a draw, and the run has no sampler$"):
-        oracle.serial_outcomes(scenario, _cells)
+        oracle.serial_outcomes(_seen_by(scenario, _cells))
 
 
 def test_serial_orders_are_held_against_their_steps_when_they_are_run_again():
@@ -696,7 +706,66 @@ def test_serial_orders_are_held_against_their_steps_when_they_are_run_again():
         invariants=(),
     )
     with pytest.raises(scheduler.ReplayDivergenceError) as caught:
-        oracle.serial_outcomes(scenario, _cells)
+        oracle.serial_outcomes(_seen_by(scenario, _cells))
     assert str(caught.value) == (
         "step 1 is put(cell='x', value='ticket 0'), but agent 'a' waits to "
         "call put(cell='x', value='ticket 1')")
+
+
+@pytest.mark.parametrize(
+    "scenario,snapshot",
+    [
+        (oversell.naive(), oversell.snapshot),
+        (oversell.atomic(), oversell.snapshot),
+        (lost_update.naive(), lost_update.snapshot),
+        (lost_update.cas(), lost_update.snapshot),
+        (write_skew.naive(), write_skew.snapshot),
+        (write_skew.cas(), write_skew.snapshot),
+        (write_skew.atomic(), write_skew.snapshot),
+    ],
+    ids=lambda value: getattr(value, "name", ""))
+def test_scenario_of_the_package_brings_the_snapshot_of_its_world(
+    scenario, snapshot
+):
+    assert scenario.snapshot is snapshot
+    # And the oracle goes by it: every serial order of every one of them
+    # has an outcome.
+    serial = oracle.serial_outcomes(scenario)
+    assert serial.scenario is scenario
+    assert sum(len(orders) for orders in serial.orders.values()) == 2
+
+
+def test_scenario_with_no_snapshot_has_no_serial_outcomes():
+    built = []
+
+    def make_world() -> _Cells:
+        built.append(_Cells())
+        return built[-1]
+
+    async def writer(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("put", cell="x", value=ctx.name)
+
+    scenario = scheduler.Scenario(
+        name="unseen", make_world=make_world, agents={"a": writer},
+        invariants=())
+    assert scenario.snapshot is None
+    with pytest.raises(scheduler.MissingSnapshotError) as caught:
+        oracle.serial_outcomes(scenario)
+    assert str(caught.value) == (
+        "the scenario 'unseen' has no snapshot, so its runs leave no "
+        "outcome to compare")
+    # Refused before anything ran.
+    assert not built
+
+
+def test_run_is_judged_with_the_snapshot_of_the_scenario_it_is_a_run_of():
+    # The serial outcomes hold their scenario, and the scenario its
+    # snapshot: one snapshot for the orders and for the run. Seen by its
+    # stock alone, the run that loses an update ends as no order ends, as
+    # it does when the orders are seen too.
+    scenario = _seen_by(
+        oversell.naive(stock=2), lambda inventory: inventory.stock)
+    serial = oracle.serial_outcomes(scenario)
+    assert serial.orders == {0: (_B1_B2, _B2_B1)}
+    lost = explore.replay(scenario, _BOTH_READ_FIRST)
+    assert oracle.judge(serial, lost) == oracle.Verdict(1, ())

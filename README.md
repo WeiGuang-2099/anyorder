@@ -237,12 +237,14 @@ could then come out otherwise. A rule about the past needs a world that
 keeps that past: the document of the lost update keeps every line it has
 held, so that its invariant can ask whether one of them is gone.
 
-For the serial-equivalence oracle a scenario also needs a snapshot
-function, such as `oversell.snapshot` or `lost_update.snapshot`, which is
-given to `oracle.serial_outcomes` with the scenario. It gives the state of
-a world as a value that can be hashed and that is equal for two worlds in
-the same state, such as a tuple of numbers and strings, and so says what
-counts as ending the same.
+For the serial-equivalence oracle a scenario also needs a snapshot, such
+as `oversell.snapshot` or `lost_update.snapshot`, which the scenario holds
+as its `snapshot`. It gives the state of a world as a value that can be
+hashed and that is equal for two worlds in the same state, such as a tuple
+of numbers and strings, and so says what counts as ending the same. It
+must say everything of the world that a later call or a later check can
+go by. A scenario that is never asked for the state of its world needs
+none.
 
 ## Limits
 

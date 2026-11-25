@@ -170,4 +170,5 @@ def _scenario(
             scheduler.Invariant(
                 "someone-on-call", someone_on_call, every_step=True),
         ),
+        snapshot=snapshot,
     )

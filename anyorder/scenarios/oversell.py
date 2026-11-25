@@ -85,4 +85,5 @@ def _scenario(
         invariants=(
             scheduler.Invariant("no-oversell", no_oversell, every_step=True),
         ),
+        snapshot=snapshot,
     )

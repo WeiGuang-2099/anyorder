@@ -2283,3 +2283,88 @@ def test_refusal_of_a_call_shows_no_more_than_the_start_of_an_argument():
         f"step 1 is record(entry='{'x' * 199}... (502 characters)), but "
         f"agent 'a' waits to call record(entry='{'y' * 199}... (502 "
         "characters))")
+
+
+def _lamp_state(lamp: _Lamp) -> tuple[bool, int]:
+    return lamp.lit, lamp.switches
+
+
+class _Stateful(_Looking):
+    """A policy and a sampler that also keep the state they are shown."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.states: list[Any] = []
+
+    def choose(self, moment: scheduler.Moment) -> str:
+        self.states.append(moment.state())
+        return super().choose(moment)
+
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> int:
+        self.states.append(moment.state())
+        return super().sample(agent, request, moment)
+
+
+def test_policy_is_shown_the_state_of_the_world_as_its_snapshot_gives_it():
+    policy = _Stateful()
+    scenario = dataclasses.replace(_lamp(3), snapshot=_lamp_state)
+    scheduler.run(scenario, policy)
+    # At each choice, the world as the calls so far have left it.
+    assert policy.states == [(False, 0), (True, 1), (False, 2)]
+
+
+def test_sampler_is_shown_the_state_of_the_world_at_its_draw():
+    async def switcher(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("before")
+        await ctx.call("switch")
+        await ctx.draw("after")
+
+    looking = _Stateful()
+    scenario = dataclasses.replace(
+        _lamp(0), agents={"a": switcher}, snapshot=_lamp_state)
+    scheduler.run(scenario, scheduler.ReplayPolicy(["a"]), looking)
+    assert looking.states == [(False, 0), (True, 1)]
+
+
+def test_scenario_needs_no_snapshot_until_it_is_asked_for_a_state():
+    scenario = _lamp(2)
+    assert scenario.snapshot is None
+    # A run of it is made, as ever.
+    assert len(scheduler.run(scenario, _Looking()).steps) == 2
+    coroutines = {}
+    asked = dataclasses.replace(
+        scenario, agents={"a": _kept(scenario.agents["a"], coroutines)})
+    with pytest.raises(scheduler.MissingSnapshotError) as caught:
+        scheduler.run(asked, _Stateful())
+    assert str(caught.value) == (
+        "the scenario 'lamp' has no snapshot to give the state of its "
+        "world")
+    assert inspect.getcoroutinestate(coroutines["a"]) == inspect.CORO_CLOSED
+
+
+def test_refusal_of_a_missing_snapshot_is_one_of_the_schedulers():
+    assert issubclass(
+        scheduler.MissingSnapshotError, scheduler.SchedulerError)
+
+
+def test_state_that_cannot_be_hashed_is_refused():
+    scenario = dataclasses.replace(
+        _lamp(1), snapshot=lambda lamp: [lamp.lit, lamp.switches])
+    # A state is held against other states and looked up by, and a list
+    # that the world goes on to change is neither.
+    with pytest.raises(TypeError) as caught:
+        scheduler.run(scenario, _Stateful())
+    assert str(caught.value) == (
+        "the snapshot of 'lamp' gave [False, 0], which cannot be hashed: "
+        "unhashable type: 'list'")
+
+
+def test_state_of_a_world_is_what_the_scenarios_snapshot_gives():
+    scenario = dataclasses.replace(_lamp(1), snapshot=_lamp_state)
+    lamp = _Lamp(True)
+    lamp.switch()
+    assert scheduler.state_of(scenario, lamp) == (False, 1)
+    with pytest.raises(scheduler.MissingSnapshotError, match="'lamp'"):
+        scheduler.state_of(_lamp(1), lamp)

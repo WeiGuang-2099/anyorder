@@ -238,7 +238,7 @@ def _failed(
     scenario: scheduler.Scenario, runs: list[scheduler.RunResult]
 ) -> list[scheduler.RunResult]:
     """Keeps the runs that end as no serial order ends."""
-    serial = oracle.serial_outcomes(scenario, write_skew.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     return [run for run in runs if oracle.judge(serial, run).failed]
 
 
@@ -350,7 +350,7 @@ def test_scenario_is_not_built_with_fewer_than_one_doctor(build, doctors):
 def test_one_doctor_alone_stays_on_call(build):
     # Each of the three makes one call when it is alone.
     scenario = _limited(build(doctors=1), 1)
-    serial = oracle.serial_outcomes(scenario, write_skew.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     (run,) = _runs(scenario)
     assert len(run.steps) == 1
     assert run.violation is None
@@ -436,7 +436,7 @@ def test_naive_doctors_fail_the_oracle_exactly_where_nobody_is_on_call(
     # doctor last. A run that leaves nobody on call ends as none of them.
     scenario = write_skew.naive(doctors=doctors)
     names = tuple(scenario.agents)
-    serial = oracle.serial_outcomes(scenario, write_skew.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     assert serial.orders == {
         _one_stays(names, last): _orders_ending_with(names, last)
         for last in names}
@@ -479,7 +479,7 @@ def test_control_lets_every_doctor_but_the_last_leave(doctors):
     # takes its doctor off call, and the last is declined.
     scenario = _control(doctors)
     names = tuple(scenario.agents)
-    serial = oracle.serial_outcomes(scenario, write_skew.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     runs = _runs(scenario)
     assert sorted(run.schedule for run in runs) == sorted(
         itertools.permutations(names))
@@ -519,7 +519,7 @@ def test_guards_allow_the_calls_of_the_longest_runs_and_no_more(doctors):
 @pytest.mark.parametrize("doctors", [2, 3, 5])
 def test_control_passes_both_oracles_under_random_schedules(doctors):
     scenario = _control(doctors)
-    serial = oracle.serial_outcomes(scenario, write_skew.snapshot)
+    serial = oracle.serial_outcomes(scenario)
     for seed in range(200):
         run = scheduler.run(scenario, scheduler.RandomPolicy(seed))
         assert run.violation is None
@@ -812,6 +812,6 @@ def test_doctor_that_asks_again_until_it_may_leave_never_ends():
     with pytest.raises(_StepLimitError, match="'leave_if_covered'"):
         explore.replay(scenario, (_D1,) + (_D2,) * 20)
     with pytest.raises(_StepLimitError):
-        oracle.serial_outcomes(scenario, write_skew.snapshot)
+        oracle.serial_outcomes(scenario)
     with pytest.raises(_StepLimitError):
         explore.explore(scenario, range(20))
