@@ -80,7 +80,7 @@ def local_history(
         and a ("draw", request, value) for each draw, with the keys of the
         values. At a draw, without the draw that is being made.
     """
-    histories, _ = _read(moment.steps, moment.draws)
+    histories, _ = _read(moment.steps, moment.draws, places=False)
     return tuple(histories.get(agent, ()))
 
 
@@ -96,7 +96,7 @@ def at(moment: scheduler.Moment) -> Configuration:
         MissingSnapshotError: The scenario has no snapshot.
         TypeError: The snapshot gave a value that cannot be hashed.
     """
-    histories, _ = _read(moment.steps, moment.draws)
+    histories, _ = _read(moment.steps, moment.draws, places=False)
     names = moment.waiting
     if moment.drawing is not None:
         names = sorted([*names, moment.drawing])
@@ -114,7 +114,7 @@ def places(
     holds a draw, and two draws at one place are draws of one agent that
     had seen and done the same.
     """
-    _, placed = _read(run.steps, run.draws)
+    _, placed = _read(run.steps, run.draws, places=True)
     return placed
 
 
@@ -159,7 +159,10 @@ class TableSampler:
 
 
 def _read(
-    steps: Sequence[scheduler.Step], draws: Sequence[scheduler.Drawn]
+    steps: Sequence[scheduler.Step],
+    draws: Sequence[scheduler.Drawn],
+    *,
+    places: bool,
 ) -> tuple[
     dict[str, list[Event]], list[tuple[Hashable, scheduler.Drawn]]
 ]:
@@ -169,9 +172,18 @@ def _read(
     with the number of steps before it. An agent's history has both in the
     order they came to the agent, so the two rows are read as one.
 
+    Args:
+        steps: The steps of a run, or of a run so far.
+        draws: Its draws.
+        places: Whether the places of the draws are wanted. A place holds
+            a copy of its agent's history up to the draw, so the places
+            of a run cost the square of its draws, where the histories
+            alone cost their number.
+
     Returns:
         The local history of every agent that has one, and each draw with
-        the place it was made at.
+        the place it was made at, or no draw if the places are not
+        wanted.
     """
     histories: dict[str, list[Event]] = {}
     placed: list[tuple[Hashable, scheduler.Drawn]] = []
@@ -179,7 +191,8 @@ def _read(
     def add(draw: scheduler.Drawn) -> None:
         history = histories.setdefault(draw.agent, [])
         request = values.key(draw.request)
-        placed.append(((draw.agent, tuple(history), request), draw))
+        if places:
+            placed.append(((draw.agent, tuple(history), request), draw))
         history.append(("draw", request, values.key(draw.value)))
 
     position = 0
