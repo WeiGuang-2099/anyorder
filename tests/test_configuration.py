@@ -7,6 +7,7 @@ one configuration go on alike.
 """
 
 import dataclasses
+import random
 import sys
 from collections.abc import Hashable, Sequence
 from typing import Any
@@ -16,6 +17,7 @@ import pytest
 from anyorder import configuration
 from anyorder import explore
 from anyorder import scheduler
+from anyorder import values
 from anyorder.scenarios import lost_update
 from anyorder.scenarios import oversell
 from anyorder.scenarios import write_skew
@@ -615,6 +617,53 @@ def test_table_refuses_a_place_that_this_python_cannot_write(where):
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
     assert table.held == {}
+
+
+@pytest.mark.skipif(
+    not getattr(sys, "get_int_max_str_digits", lambda: 0)(),
+    reason="this Python writes an integer of any length")
+def test_table_is_not_built_with_a_seed_that_this_python_cannot_write():
+    digits = sys.get_int_max_str_digits()
+    # A table writes its seed out with every place. With a seed that this
+    # Python does not write it could make no draw, and it says so when it
+    # is built and not at a draw in the middle of a run. Twice the
+    # digits, as for a place.
+    for seed in (10 ** (2 * digits), -(10 ** (2 * digits))):
+        with pytest.raises(ValueError):
+            configuration.TableSampler(seed)
+    # A seed of as many digits as this Python writes is a seed like any
+    # other.
+    table = configuration.TableSampler(10 ** digits - 1)
+    run = scheduler.run(_gambling(), scheduler.RandomPolicy(0), table)
+    assert len(run.draws) == 1
+    assert [draw.value for draw in run.draws] == list(table.held.values())
+
+
+_WHEEL = tuple((number, 1) for number in range(1000))
+
+
+@pytest.mark.parametrize(
+    "seed", [-3, 3, 10 ** 30, 10 ** 30 + 1],
+    ids=["minus", "plus", "long", "long-and-one"])
+def test_table_writes_its_seed_whole_and_with_its_sign(seed):
+    async def spinner(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw(_WHEEL)
+
+    scenario = scheduler.Scenario(
+        name="wheel", make_world=_Counter,
+        agents={name: spinner for name in "abcdef"}, invariants=())
+    run = scheduler.run(
+        scenario, scheduler.RandomPolicy(0),
+        configuration.TableSampler(seed))
+    # Each draw against a generator seeded here with the whole seed: the
+    # table of -3 is not the table of 3, and two long seeds that start
+    # alike are two tables.
+    wanted = []
+    for name in "abcdef":
+        place = (name, (), values.key(_WHEEL))
+        rng = random.Random(f"anyorder table {seed} {ascii(place)}")
+        wanted.append((name, scheduler.pick(name, _WHEEL, rng)))
+    assert [(draw.agent, draw.value) for draw in run.draws] == wanted
 
 
 def _configurations(

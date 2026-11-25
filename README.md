@@ -320,7 +320,7 @@ none.
   than a draw of the seeded sampler. And at every draw, held or not, it
   reads the agent's history off the run so far. A place that holds an
   integer too long for Python to write as text has no draw in a table,
-  and the run ends there.
+  and the run ends there. A table is not built with such a seed.
 * A moment shows a run when it is looked at. A policy that holds on to it
   sees the run move on. The steps and the draws it gives are the run's
   own records and must not be changed, where the calls it gives are

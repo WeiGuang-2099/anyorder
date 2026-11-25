@@ -134,10 +134,17 @@ class TableSampler:
     Attributes:
         held: The draws made so far, by place. Their number is the number
             of draws that all the runs so far needed between them.
+
+    Raises:
+        ValueError: The seed is an integer too long for this Python to
+            write. A table writes its seed out to seed each draw.
     """
 
     def __init__(self, seed: int) -> None:
-        self._seed = seed
+        # Written out here and not at the first draw, so that a seed Python
+        # cannot write is refused before any run and not in the middle of
+        # one.
+        self._written_seed = f"anyorder table {seed}"
         self.held: dict[Hashable, Any] = {}
 
     def sample(
@@ -166,7 +173,7 @@ class TableSampler:
                     "stands holds an integer too long for this Python to "
                     "write, and a table writes a place out to seed its "
                     "draw") from None
-            rng = random.Random(f"anyorder table {self._seed} {written}")
+            rng = random.Random(f"{self._written_seed} {written}")
             self.held[place] = scheduler.pick(agent, request, rng)
         return self.held[place]
 
