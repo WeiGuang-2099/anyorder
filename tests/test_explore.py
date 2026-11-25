@@ -4,9 +4,11 @@ import collections
 import dataclasses
 import itertools
 from collections.abc import Collection, Mapping, Sequence
+from typing import Any
 
 import pytest
 
+from anyorder import configuration
 from anyorder import explore
 from anyorder import scheduler
 from anyorder.scenarios import oversell
@@ -574,8 +576,8 @@ def test_search_refuses_a_failure_whose_draws_do_not_replay():
 
 
 def test_exhaustive_search_does_not_run_a_scenario_that_draws():
-    # Its runs would have to share their draws, and one stream of draws
-    # gives an agent another sample under another schedule. Not built yet.
+    # Given no sampler, that is. Its runs have to share their draws, which
+    # a table sampler gives them.
     with pytest.raises(
             scheduler.UnsupportedAwaitError,
             match="^agent 'a' awaited a draw, and the run has no sampler$"):
@@ -641,3 +643,105 @@ def test_exhaustive_search_holds_each_run_against_its_steps():
     assert str(caught.value) == (
         "step 1 is post(ticket=0), but agent 'a' waits to call "
         "post(ticket=1)")
+
+
+class _SetsAfter:
+    """A table of the tests' own for the counter: whether a sets, by what
+    it read."""
+
+    def __init__(self, *sets: bool) -> None:
+        self._sets = sets
+
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> bool:
+        (read,) = (step for step in moment.steps if step.agent == agent)
+        return self._sets[read.result]
+
+
+@pytest.mark.parametrize(
+    "sets", list(itertools.product([False, True], repeat=3)), ids=str)
+def test_every_schedule_of_the_counter_under_each_table(sets):
+    # a reads first, second or third among the three first calls, and
+    # reads 0, 1 or 2. Where it sets, its set is one more call.
+    # * It reads 0. If it sets, the set and the two incs come in 3! = 6
+    #   orders, and an inc is lost in the 4 that do not start with the
+    #   set. If not, the incs come in 2.
+    # * It reads 1, after either inc: 2 ways. If it sets, the set and
+    #   the other inc come in 2 orders, and the inc is lost in 1: 4
+    #   schedules, 2 lose. If not, 2 schedules.
+    # * It reads 2, after both incs in 2 orders, and nothing is left to
+    #   lose whether it sets or not: 2 schedules.
+    at_0, at_1, _ = sets
+    scenario = _counting()
+    runs = list(explore.exhaust(scenario, _SetsAfter(*sets)))
+    assert len(runs) == (6 if at_0 else 2) + (4 if at_1 else 2) + 2
+    lost = [run for run in runs if run.violation is not None]
+    assert len(lost) == (4 if at_0 else 0) + (2 if at_1 else 0)
+    # Each run was replayed from its steps and its draws before it came.
+    for run in runs:
+        assert len(run.draws) == 1
+        assert explore.replay(scenario, run.steps, run.draws) == run
+    assert len({run.schedule for run in runs}) == len(runs)
+
+
+def test_exhaustive_search_under_a_table_needs_three_draws_for_all_it_runs():
+    found = []
+    for seed in range(8):
+        table = configuration.TableSampler(seed)
+        runs = list(explore.exhaust(_counting(), table))
+        # One draw for each of the three places a can stand at, however
+        # many schedules come to them.
+        assert len(table.held) == 3
+        found.append(
+            (len(runs), sum(run.violation is not None for run in runs)))
+    # Written out, as the draws of a seed are: tables 3 and 4 have a set
+    # after it read 0 and after it read 1, and tables 0, 2 and 6 after
+    # neither.
+    assert found == [
+        (6, 0), (8, 2), (6, 0), (12, 6), (12, 6), (8, 2), (6, 0), (10, 4)]
+
+
+def test_exhaustive_search_refuses_a_sampler_that_is_no_table():
+    # A seeded sampler draws in the order it is asked, and the search
+    # asks it again in every run. With seed 0 it has a stop after it read
+    # 0 in one run and set in another.
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        list(explore.exhaust(_counting(), scheduler.SeededSampler(0)))
+    assert str(caught.value) == (
+        "agent 'a' of 'counting' drew False in one run and True in "
+        "another, where it had seen and done the same: an exhaustive "
+        "search needs a sampler that gives one draw at one place")
+    # With seed 4 the run that draws otherwise cannot follow the start
+    # of its schedule, and ends there.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^step 2 names 'a', which is not waiting"):
+        list(explore.exhaust(_counting(), scheduler.SeededSampler(4)))
+    # With seed 3 it happens to draw the same at each place, and then its
+    # runs are those of one table: a stops wherever it reads.
+    runs = list(explore.exhaust(_counting(), scheduler.SeededSampler(3)))
+    assert len(runs) == 6
+    assert not any(draw.value for run in runs for draw in run.draws)
+
+
+def test_exhaustive_search_tells_draws_that_python_takes_for_equal_apart():
+    class Loose:
+        """Gives True at first and 1 from then on."""
+
+        def __init__(self) -> None:
+            self._given = itertools.chain([True], itertools.repeat(1))
+
+        def sample(
+            self, agent: str, request: Any, moment: scheduler.Moment
+        ) -> Any:
+            return next(self._given)
+
+    # The agent sets either way, so every run is equal to the run a
+    # table would give, as Python compares. An agent can tell True from
+    # 1, and the search holds the draws apart as a trace file does.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^agent 'a' of 'counting' drew True in one run and 1 in "
+                  "another"):
+        list(explore.exhaust(_counting(), Loose()))

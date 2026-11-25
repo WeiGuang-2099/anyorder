@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Sequence
 
+from anyorder import configuration
 from anyorder import scheduler
+from anyorder import values
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,25 +62,33 @@ def explore(
     return None
 
 
-def exhaust(scenario: scheduler.Scenario) -> Iterator[scheduler.RunResult]:
+def exhaust(
+    scenario: scheduler.Scenario, sampler: scheduler.Sampler | None = None
+) -> Iterator[scheduler.RunResult]:
     """Runs every complete schedule of a scenario, depth first.
 
     Waiting agents are tried in name order, so schedules come out sorted.
-    Each run is replayed from its schedule before it is yielded, so a
-    failure taken from here is one that can be reproduced. Running every
-    schedule twice probes that the scenario is deterministic. It does not
-    prove it.
+    Each run is replayed from its steps and its draws before it is
+    yielded, so a failure taken from here is one that can be reproduced.
+    Running every schedule twice probes that the scenario is
+    deterministic. It does not prove it.
 
     Nothing bounds the search: every agent must finish under every
     schedule, and the number of schedules can grow exponentially with
     the number of calls and factorially with the number of agents.
 
-    The runs have no sampler, so a scenario whose agents draw is not
-    searched: its runs would have to share one table of draws, and nothing
-    here keeps one yet.
+    A scenario whose agents draw is searched under one sampler, which all
+    the runs share. It must give an agent the same draw wherever the agent
+    has seen and done the same, as configuration.TableSampler does: then
+    the agents are a program with no chance left in it, and its schedules
+    are what is run. A sampler that draws in the order it is asked can
+    give another draw at the same place in another run, and the search
+    refuses the run in which it does.
 
     Args:
         scenario: What to run.
+        sampler: Gives the agents their draws, in every run. With none, a
+            scenario whose agents draw is not searched.
 
     Yields:
         The run of each complete schedule, once.
@@ -88,24 +98,57 @@ def exhaust(scenario: scheduler.Scenario) -> Iterator[scheduler.RunResult]:
             left the start of the schedule it was given. Either means the
             scenario is not deterministic: state outlives a run, or an
             argument, a tool's result or an invariant's message does not
-            compare equal from run to run.
-        UnsupportedAwaitError: An agent drew.
+            compare equal from run to run. Or the sampler gave an agent
+            another draw in this run than in one before it, where the
+            agent had seen and done the same.
+        UnsupportedAwaitError: An agent drew and there is no sampler.
     """
     prefix: tuple[str, ...] | None = ()
+    drawn: dict[Hashable, scheduler.Drawn] = {}
     while prefix is not None:
         policy = _PrefixPolicy(prefix)
-        result = scheduler.run(scenario, policy)
+        result = scheduler.run(scenario, policy, sampler)
         if len(result.steps) < len(prefix):
             raise scheduler.ReplayDivergenceError(
                 f"a run of {scenario.name!r} ended after "
                 f"{len(result.steps)} steps, inside the {len(prefix)} steps "
                 "it was given to follow")
-        if replay(scenario, result.steps) != result:
+        if result.draws:
+            _expect_one_draw_at_each_place(scenario, drawn, result)
+        if replay(scenario, result.steps, result.draws) != result:
             raise scheduler.ReplayDivergenceError(
                 f"the schedule {' '.join(result.schedule)!r} of "
                 f"{scenario.name!r} replayed to a different trace")
         yield result
         prefix = _next_prefix(result.schedule, policy.seen)
+
+
+def _expect_one_draw_at_each_place(
+    scenario: scheduler.Scenario,
+    drawn: dict[Hashable, scheduler.Drawn],
+    result: scheduler.RunResult,
+) -> None:
+    """Refuses a run that drew otherwise than a run before it at one place.
+
+    The runs of a search must be runs of one program, and they are if an
+    agent is given the same draw wherever it has seen and done the same.
+    A replay does not tell: it is given the draws of the run it replays.
+
+    Args:
+        scenario: What is searched.
+        drawn: The first draw at each place, of the runs so far. Those of
+            this run are added.
+        result: This run.
+    """
+    for place, draw in configuration.places(result):
+        first = drawn.setdefault(place, draw)
+        if values.key(first.value) != values.key(draw.value):
+            raise scheduler.ReplayDivergenceError(
+                f"agent {draw.agent!r} of {scenario.name!r} drew "
+                f"{values.shown(first.value)} in one run and "
+                f"{values.shown(draw.value)} in another, where it had seen "
+                "and done the same: an exhaustive search needs a sampler "
+                "that gives one draw at one place")
 
 
 def replay(

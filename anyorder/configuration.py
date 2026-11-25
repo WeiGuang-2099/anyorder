@@ -22,13 +22,20 @@ way. A world can pass through a state that breaks one and come back, and a
 run that did has failed. Whoever looks runs up by their configuration asks
 the moment for the violation as well.
 
+A table sampler gives one draw for each agent and local history. Under it
+an agent draws the same wherever it has seen and done the same, so a draw
+that was made once serves every schedule that comes to that place: all the
+schedules of a scenario need no more draws than there are places.
+
 Outside the scheduler: all of this is read off a Moment.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Hashable
+import random
+from collections.abc import Hashable, Sequence
+from typing import Any
 
 from anyorder import scheduler
 from anyorder import values
@@ -68,7 +75,8 @@ def local_history(
         and a ("draw", request, value) for each draw, with the keys of the
         values. At a draw, without the draw that is being made.
     """
-    return tuple(_histories(moment).get(agent, ()))
+    histories, _ = _read(moment.steps, moment.draws)
+    return tuple(histories.get(agent, ()))
 
 
 def at(moment: scheduler.Moment) -> Configuration:
@@ -78,35 +86,97 @@ def at(moment: scheduler.Moment) -> Configuration:
         MissingSnapshotError: The scenario has no snapshot.
         TypeError: The snapshot gave a value that cannot be hashed.
     """
-    histories = _histories(moment)
+    histories, _ = _read(moment.steps, moment.draws)
     return Configuration(moment.state(), tuple(
         (name, tuple(histories.get(name, ()))) for name in moment.waiting))
 
 
-def _histories(moment: scheduler.Moment) -> dict[str, list[Event]]:
-    """Returns the local history of every agent that has one.
+def places(
+    run: scheduler.RunResult,
+) -> list[tuple[Hashable, scheduler.Drawn]]:
+    """Returns each draw of a run with the place it was made at.
+
+    A place is the agent that drew, its local history before the draw and
+    the key of what it asked to draw from. It is where a table sampler
+    holds a draw, and two draws at one place are draws of one agent that
+    had seen and done the same.
+    """
+    _, placed = _read(run.steps, run.draws)
+    return placed
+
+
+class TableSampler:
+    """Draws from written distributions, one draw for each place in a table.
+
+    A place is an agent, its local history and what it asks to draw from.
+    The draw at a place is made once, with a generator seeded with the
+    table's seed and the place, and is held: whoever asks at that place
+    again is given the same, under every schedule and in every run, and
+    whichever places were asked for before. So under one table the agents
+    of a scenario are a program with no chance left in it, and every
+    schedule of it can be run. One table is one replicate of the draws of
+    a scenario.
+
+    Attributes:
+        held: The draws made so far, by place. Their number is the number
+            of draws that all the runs so far needed between them.
+    """
+
+    def __init__(self, seed: int) -> None:
+        self._seed = seed
+        self.held: dict[Hashable, Any] = {}
+
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> Any:
+        """Returns the draw of the place the agent stands at.
+
+        Raises:
+            UnsupportedValueError: The request is no written distribution.
+        """
+        place = (
+            agent, local_history(moment, agent), values.key(request))
+        if place not in self.held:
+            # Written with ascii: how Python shows a character outside
+            # it depends on the version.
+            rng = random.Random(
+                f"anyorder table {self._seed} {ascii(place)}")
+            self.held[place] = scheduler.pick(agent, request, rng)
+        return self.held[place]
+
+
+def _read(
+    steps: Sequence[scheduler.Step], draws: Sequence[scheduler.Drawn]
+) -> tuple[
+    dict[str, list[Event]], list[tuple[Hashable, scheduler.Drawn]]
+]:
+    """Reads the steps and the draws of a run as the agents came to them.
 
     A run keeps its steps in one row and its draws in another, each draw
     with the number of steps before it. An agent's history has both in the
     order they came to the agent, so the two rows are read as one.
+
+    Returns:
+        The local history of every agent that has one, and each draw with
+        the place it was made at.
     """
     histories: dict[str, list[Event]] = {}
-    draws = moment.draws
+    placed: list[tuple[Hashable, scheduler.Drawn]] = []
+
+    def add(draw: scheduler.Drawn) -> None:
+        history = histories.setdefault(draw.agent, [])
+        request = values.key(draw.request)
+        placed.append(((draw.agent, tuple(history), request), draw))
+        history.append(("draw", request, values.key(draw.value)))
+
     position = 0
-    for before, step in enumerate(moment.steps):
+    for before, step in enumerate(steps):
         while position < len(draws) and draws[position].step <= before:
-            _add_draw(histories, draws[position])
+            add(draws[position])
             position += 1
         histories.setdefault(step.agent, []).append((
             "call", step.tool, values.key(step.args),
             values.key(step.result)))
     for draw in draws[position:]:
-        _add_draw(histories, draw)
-    return histories
-
-
-def _add_draw(
-    histories: dict[str, list[Event]], draw: scheduler.Drawn
-) -> None:
-    histories.setdefault(draw.agent, []).append(
-        ("draw", values.key(draw.request), values.key(draw.value)))
+        add(draw)
+    return histories, placed

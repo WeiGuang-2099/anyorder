@@ -499,14 +499,12 @@ class SeededSampler:
             UnsupportedValueError: The request is no written distribution.
                 Nothing is drawn for it.
         """
-        bounds = list(itertools.accumulate(_weights(agent, request)))
         if self._rng is None:
             # Only now: most runs make no draw. And seeded with a text: a
             # policy of the same seed chooses from the stream of the
             # number, and a draw must not be tied to a choice.
             self._rng = random.Random(f"anyorder draws {self._seed}")
-        point = self._rng.randrange(bounds[-1])
-        return request[bisect.bisect_right(bounds, point)][0]
+        return pick(agent, request, self._rng)
 
 
 class ReplaySampler:
@@ -537,6 +535,24 @@ class ReplaySampler:
                 f"draw from {values.shown(request)}")
         self._position += 1
         return held.value
+
+
+def pick(agent: str, request: Any, rng: random.Random) -> Any:
+    """Returns one outcome of a written distribution, drawn with a generator.
+
+    Args:
+        agent: The agent that draws, for the refusal to name.
+        request: The written distribution: a tuple or a list of pairs,
+            each an outcome and a weight that is a positive integer.
+        rng: Where the draw comes from. One number is taken from it.
+
+    Raises:
+        UnsupportedValueError: The request is no written distribution.
+            Nothing is taken from the generator.
+    """
+    bounds = list(itertools.accumulate(_weights(agent, request)))
+    point = rng.randrange(bounds[-1])
+    return request[bisect.bisect_right(bounds, point)][0]
 
 
 def _weights(agent: str, request: Any) -> list[int]:

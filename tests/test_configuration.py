@@ -255,6 +255,184 @@ async def _only_draws(ctx: scheduler.AgentContext) -> None:
     await ctx.draw("coin")
 
 
+# The table sampler. A gambler adds to the counter, is told the count, and
+# flips a coin for whether it leaves a note. The count it is told is 1, 2
+# or 3 with two others that add, so it stands at one of three places when
+# it flips.
+_COIN = (("heads", 1), ("tails", 1))
+_COIN_KEY = ("tuple", (("tuple", ("heads", 1)), ("tuple", ("tails", 1))))
+
+
+async def _gambler(ctx: scheduler.AgentContext) -> None:
+    count = await ctx.call("inc")
+    if await ctx.draw(_COIN) == "heads":
+        await ctx.call("note", text=f"{ctx.name} at {count}")
+
+
+def _gambling() -> scheduler.Scenario:
+    return _counter(a=_gambler, b=_adder, c=_adder)
+
+
+def _flipped_at(count: int) -> Hashable:
+    """The place where a flips after it was told a count."""
+    return ("a", (("call", "inc", _NO_ARGS, count),), _COIN_KEY)
+
+
+@pytest.mark.parametrize(
+    "seed,sides,schedules",
+    [
+        (0, ("heads", "tails", "heads"), 10),
+        (1, ("tails", "tails", "tails"), 6),
+        (2, ("tails", "heads", "tails"), 8),
+        (4, ("tails", "tails", "heads"), 6),
+        (5, ("heads", "tails", "tails"), 10),
+    ])
+def test_table_holds_one_draw_for_each_place_and_every_schedule_is_run(
+    seed, sides, schedules
+):
+    table = configuration.TableSampler(seed)
+    runs = list(explore.exhaust(_gambling(), table))
+    # The sides are written out, as the draws of a seed are elsewhere: a
+    # table must hold the same under every Python.
+    assert table.held == {
+        _flipped_at(count): side
+        for count, side in zip((1, 2, 3), sides)}
+    # a adds first, second or third. Where it flips heads it has a note
+    # to leave: among the two other incs if it added first, 3! = 6
+    # orders for 2, beside the one other inc if it added second, 2 * 2 =
+    # 4 for 2, and after both if it added third, 2 either way.
+    first, second, _ = (side == "heads" for side in sides)
+    assert len(runs) == schedules == (
+        (6 if first else 2) + (4 if second else 2) + 2)
+    # All of them between them needed three draws, one at each place.
+    assert sum(len(run.draws) for run in runs) == len(runs)
+    for run in runs:
+        (draw,) = run.draws
+        assert draw.value == sides[run.steps[draw.step - 1].result - 1]
+
+
+def test_table_gives_the_draw_of_a_place_whatever_was_asked_before():
+    scenario = _gambling()
+    forward = configuration.TableSampler(0)
+    backward = configuration.TableSampler(0)
+    # a adds first in one run and last in the other, so the two tables
+    # are asked for their places in another order.
+    scheduler.run(scenario, scheduler.ReplayPolicy("aabc"), forward)
+    scheduler.run(scenario, scheduler.ReplayPolicy("bcaa"), backward)
+    assert list(forward.held) == [_flipped_at(1)]
+    assert list(backward.held) == [_flipped_at(3)]
+    scheduler.run(scenario, scheduler.ReplayPolicy("bcaa"), forward)
+    scheduler.run(scenario, scheduler.ReplayPolicy("aabc"), backward)
+    assert forward.held == backward.held
+    assert list(forward.held) != list(backward.held)
+
+
+def test_table_of_another_seed_holds_other_draws():
+    def held(seed: int) -> tuple[str, ...]:
+        table = configuration.TableSampler(seed)
+        list(explore.exhaust(_gambling(), table))
+        return tuple(table.held[_flipped_at(count)] for count in (1, 2, 3))
+
+    assert len({held(seed) for seed in range(20)}) > 4
+
+
+def test_table_draws_by_weight():
+    rarely = (("win", 1), ("lose", 3))
+    table = configuration.TableSampler(7)
+    nowhere = scheduler.Moment(_gambling(), None, {}, [], [])
+    won = sum(
+        table.sample(f"agent-{number}", rarely, nowhere) == "win"
+        for number in range(4000))
+    # 4000 agents that have done nothing stand at 4000 places. A quarter
+    # is 1000, with a standard deviation of 27.
+    assert len(table.held) == 4000
+    assert won == 1022
+
+
+def test_place_is_the_agent_its_history_and_what_it_asks_to_draw_from():
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw(_COIN)
+        await ctx.draw(_COIN)
+        await ctx.draw([["heads", 1], ["tails", 1]])
+        await ctx.draw((("heads", 1), ("tails", 2)))
+
+    table = configuration.TableSampler(0)
+    result = scheduler.run(
+        _counter(a=asker, b=asker), scheduler.ReplayPolicy([]), table)
+    # Two agents, and for each of them four places: the second draw from
+    # the coin comes after the first, the list is not the tuple, and the
+    # last has another weight.
+    assert len(table.held) == 8
+    assert [place for place, _ in configuration.places(result)] == list(
+        table.held)
+    first, second, third, fourth = list(table.held)[:4]
+    assert first == ("a", (), _COIN_KEY)
+    assert second == ("a", (("draw", _COIN_KEY, table.held[first]),), _COIN_KEY)
+    assert third[2] == (
+        "list", (("list", ("heads", 1)), ("list", ("tails", 1))))
+    assert fourth[2] != _COIN_KEY
+
+
+def test_place_tells_what_python_takes_for_equal_apart():
+    class Teller:
+        """A world that tells an agent a number of its choosing."""
+
+        def tell(self, what: Any) -> Any:
+            return what
+
+    def place(told: Any) -> Hashable:
+        async def asker(ctx: scheduler.AgentContext) -> None:
+            await ctx.call("tell", what=told)
+            await ctx.draw(_COIN)
+
+        scenario = scheduler.Scenario(
+            name="teller", make_world=Teller, agents={"a": asker},
+            invariants=())
+        table = configuration.TableSampler(0)
+        scheduler.run(scenario, scheduler.ReplayPolicy(["a"]), table)
+        (held,) = table.held
+        return held
+
+    # An agent that was told True is not where an agent that was told 1
+    # is, and each has a draw of its own.
+    assert len({place(1), place(True), place(1.0)}) == 3
+    assert place(1) == place(1)
+
+
+def test_places_of_a_run_are_those_its_draws_were_made_at():
+    scenario = _gambling()
+    table = configuration.TableSampler(0)
+    # Told 2, a flips tails under this table and leaves no note.
+    run = scheduler.run(scenario, scheduler.ReplayPolicy("bac"), table)
+    assert configuration.places(run) == [(_flipped_at(2), run.draws[0])]
+    assert configuration.places(
+        scheduler.run(_counter(b=_adder), scheduler.ReplayPolicy("b"))) == []
+
+
+def test_table_refuses_what_is_no_written_distribution():
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("coin")
+
+    table = configuration.TableSampler(0)
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^agent 'a' cannot draw from 'coin': a written"):
+        scheduler.run(_counter(a=asker), scheduler.ReplayPolicy([]), table)
+    assert table.held == {}
+
+
+def test_table_writes_a_place_the_same_under_every_python():
+    # A place is written out to seed its draw, and written with ascii:
+    # how Python shows a character outside it is each version's to say.
+    # Under these two seeds the draw would be tails if the name were
+    # written as Python shows it.
+    name = "caf" + chr(233)
+    nowhere = scheduler.Moment(_gambling(), None, {}, [], [])
+    for seed in (4, 6):
+        table = configuration.TableSampler(seed)
+        assert table.sample(name, _COIN, nowhere) == "heads"
+
+
 def _configurations(
     scenario: scheduler.Scenario,
 ) -> tuple[int, dict[Hashable, Any]]:
