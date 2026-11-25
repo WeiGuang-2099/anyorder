@@ -245,12 +245,32 @@ def test_invariant_names_the_lines_that_are_gone_and_those_that_are_left():
     assert lost_update.no_line_lost(document) is None
 
 
-def test_snapshot_of_a_document_is_its_version_and_its_lines_in_order():
+def test_snapshot_of_a_document_is_its_version_its_lines_and_those_it_held():
     # Three lines at version 2, and not in the order of the alphabet.
+    # The lines it has held are in the order they came: c with the first
+    # write, then b and a.
     document = lost_update.Document()
     document.write(("c",))
     document.write(("b", "a", "c"))
-    assert lost_update.snapshot(document) == (2, ("b", "a", "c"))
+    assert lost_update.snapshot(document) == (
+        2, ("b", "a", "c"), ("c", "b", "a"))
+
+
+def test_snapshot_tells_apart_documents_that_the_invariant_tells_apart():
+    # Both at version 2 with the one line b. The first held a and lost
+    # it, and the second never held another line. The invariant goes by
+    # the lines a document has held, so a state that left them out would
+    # be one state with two answers.
+    lost = lost_update.Document()
+    lost.write(("a",))
+    lost.write(("b",))
+    kept = lost_update.Document()
+    kept.write(("b",))
+    kept.write(("b",))
+    assert (lost.version, lost.lines) == (kept.version, kept.lines)
+    assert lost_update.no_line_lost(lost) is not None
+    assert lost_update.no_line_lost(kept) is None
+    assert lost_update.snapshot(lost) != lost_update.snapshot(kept)
 
 
 def test_two_naive_editors_have_6_schedules_and_4_lose_a_line():
@@ -317,12 +337,13 @@ def test_three_naive_editors_have_90_schedules_and_84_lose_a_line():
 @pytest.mark.parametrize("editors", [2, 3])
 def test_naive_editors_fail_the_oracle_exactly_where_a_line_is_lost(editors):
     # One after another, each editor adds its line below those before it,
-    # so a serial order ends at version n with the lines in its own order.
-    # A run that lost a line ends with fewer lines than n.
+    # so a serial order ends at version n with the lines in its own order,
+    # which is also the order the document came to hold them in. A run
+    # that lost a line ends with fewer lines than n.
     scenario = lost_update.naive(editors=editors)
     serial = oracle.serial_outcomes(scenario)
     assert serial.orders == {
-        (editors, order): (order,)
+        (editors, order, order): (order,)
         for order in itertools.permutations(scenario.agents)}
     runs = _runs(scenario)
     lost = _lost(runs)
@@ -351,7 +372,8 @@ def test_two_cas_editors_have_6_schedules_and_4_hold_a_refused_write():
     assert _lost(runs) == []
     for run in runs:
         wrote = tuple(step.agent for step in run.steps if step.result is True)
-        assert oracle.judge(serial, run) == oracle.Verdict((2, wrote), (wrote,))
+        assert oracle.judge(serial, run) == oracle.Verdict(
+            (2, wrote, wrote), (wrote,))
 
 
 def test_three_cas_editors_have_498_schedules_and_all_pass():
@@ -386,7 +408,8 @@ def test_three_cas_editors_have_498_schedules_and_all_pass():
     assert _lost(runs) == []
     for run in runs:
         wrote = tuple(step.agent for step in run.steps if step.result is True)
-        assert oracle.judge(serial, run) == oracle.Verdict((3, wrote), (wrote,))
+        assert oracle.judge(serial, run) == oracle.Verdict(
+            (3, wrote, wrote), (wrote,))
 
 
 @pytest.mark.parametrize("editors", [2, 3])
@@ -545,7 +568,8 @@ def test_editor_that_tries_again_without_reading_never_ends():
     # cut at the 20 calls the test allows.
     scenario = _edited_by(_stubborn_editor)
     serial = oracle.serial_outcomes(scenario)
-    assert set(serial.orders) == {(2, (_E1, _E2)), (2, (_E2, _E1))}
+    assert set(serial.orders) == {
+        (2, (_E1, _E2), (_E1, _E2)), (2, (_E2, _E1), (_E2, _E1))}
     with pytest.raises(_StepLimitError, match="'write_if'"):
         explore.replay(scenario, (_E1, _E2, _E1) + (_E2,) * 18)
     with pytest.raises(_StepLimitError):

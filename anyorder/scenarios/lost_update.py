@@ -85,9 +85,16 @@ def no_line_lost(document: Document) -> str | None:
     return f"{gone} and now holds only {', '.join(document.lines)}"
 
 
-def snapshot(document: Document) -> tuple[int, tuple[str, ...]]:
-    """Gives the state a run leaves: the version and the lines in order."""
-    return document.version, document.lines
+def snapshot(
+    document: Document,
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+    """Gives the state of a document.
+
+    The version, the lines in order and every line the document has held,
+    in the order they came. The last is what the invariant goes by, so two
+    documents in one state get one answer from it.
+    """
+    return document.version, document.lines, document.held
 
 
 def naive(editors: int = 2) -> scheduler.Scenario:
