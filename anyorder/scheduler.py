@@ -21,6 +21,9 @@ goes on. What was asked and what was given are values a call carries,
 taken as a call's are, and the run keeps each draw beside its steps: a run
 is fixed by its schedule and its draws together.
 
+A policy and a sampler are shown the run as it stands when they are asked,
+as a Moment: who waits, with which call, and every step and draw so far.
+
 Nothing here reads the clock, starts a thread or uses an event loop.
 """
 
@@ -268,11 +271,71 @@ class RunResult:
         return tuple(step.agent for step in self.steps)
 
 
+class Moment:
+    """A run as it stands when a policy or a sampler is asked.
+
+    One moment serves a whole run. It keeps nothing: it shows the run as
+    it stands when it is looked at, so whoever holds on to it sees the run
+    move on. The lists and the calls it gives are made for whoever asks,
+    and nothing done to them reaches the run. The steps and the draws are
+    the run's own records, which nobody is to change.
+    """
+
+    __slots__ = ("_pending", "_steps", "_draws", "_violation")
+
+    def __init__(
+        self, pending: _Pending, steps: list[Step], draws: list[Drawn]
+    ) -> None:
+        self._pending = pending
+        self._steps = steps
+        self._draws = draws
+        self._violation: Violation | None = None
+
+    @property
+    def waiting(self) -> list[str]:
+        """The agents that wait to make a call, in name order.
+
+        At a draw the agent that draws is not among them: it has not
+        said yet which call it makes next.
+        """
+        return sorted(self._pending)
+
+    @property
+    def calls(self) -> dict[str, Effect]:
+        """The call that each waiting agent waits to make, in name order.
+
+        Each with a copy of its arguments, as a tool gets one.
+        """
+        return {
+            name: Effect(self._pending[name][1], values.take(
+                self._pending[name][2]))
+            for name in sorted(self._pending)}
+
+    @property
+    def steps(self) -> tuple[Step, ...]:
+        """Every step so far."""
+        return tuple(self._steps)
+
+    @property
+    def draws(self) -> tuple[Drawn, ...]:
+        """Every draw so far. At a draw, without the one being made."""
+        return tuple(self._draws)
+
+    @property
+    def violation(self) -> Violation | None:
+        """The first violation so far of what must hold after every step.
+
+        It is None at a draw that an agent makes before its first call:
+        agents are started before the fresh world is asked.
+        """
+        return self._violation
+
+
 class Policy(Protocol):
     """Chooses which waiting agent runs next."""
 
-    def choose(self, waiting: Sequence[str]) -> str:
-        """Returns one name from waiting, which is sorted and not empty."""
+    def choose(self, moment: Moment) -> str:
+        """Returns one name from moment.waiting, which is not empty."""
 
 
 class RandomPolicy:
@@ -281,8 +344,8 @@ class RandomPolicy:
     def __init__(self, seed: int) -> None:
         self._rng = random.Random(seed)
 
-    def choose(self, waiting: Sequence[str]) -> str:
-        return self._rng.choice(waiting)
+    def choose(self, moment: Moment) -> str:
+        return self._rng.choice(moment.waiting)
 
 
 class ReplayPolicy:
@@ -292,7 +355,8 @@ class ReplayPolicy:
         self._schedule = tuple(schedule)
         self._position = 0
 
-    def choose(self, waiting: Sequence[str]) -> str:
+    def choose(self, moment: Moment) -> str:
+        waiting = moment.waiting
         if self._position == len(self._schedule):
             raise ReplayDivergenceError(
                 f"the schedule ends after {self._position} steps but "
@@ -309,13 +373,14 @@ class ReplayPolicy:
 class Sampler(Protocol):
     """Gives the samples that agents draw."""
 
-    def sample(self, agent: str, request: Any) -> Any:
+    def sample(self, agent: str, request: Any, moment: Moment) -> Any:
         """Returns one sample.
 
         Args:
             agent: The agent that draws.
             request: What it asked to draw from. A list or a dict in it is
                 a copy for the sampler.
+            moment: The run as it stands at the draw.
 
         Returns:
             The sample, a value a call carries.
@@ -340,8 +405,13 @@ class SeededSampler:
         self._seed = seed
         self._rng: random.Random | None = None
 
-    def sample(self, agent: str, request: Any) -> Any:
+    def sample(
+        self, agent: str, request: Any, moment: Moment | None = None
+    ) -> Any:
         """Returns one outcome of a written distribution.
+
+        The moment is not looked at: the draws go by the order they are
+        asked for and by nothing else.
 
         Raises:
             UnsupportedValueError: The request is no written distribution.
@@ -364,7 +434,9 @@ class ReplaySampler:
         self._draws = tuple(draws)
         self._position = 0
 
-    def sample(self, agent: str, request: Any) -> Any:
+    def sample(
+        self, agent: str, request: Any, moment: Moment | None = None
+    ) -> Any:
         if self._position == len(self._draws):
             raise ReplayDivergenceError(
                 f"the draws end after {self._position} but agent {agent!r} "
@@ -460,14 +532,16 @@ def run(
     pending: _Pending = {}
     steps: list[Step] = []
     draws: list[Drawn] = []
-    draw = functools.partial(_drawn, sampler, draws, steps)
+    moment = Moment(pending, steps, draws)
+    draw = functools.partial(_drawn, sampler, draws, steps, moment)
     try:
         for name in names:
             agent = scenario.agents[name]
             _advance(pending, name, agent(AgentContext(name)), None, draw)
         violation = _first_violation(scenario, world, 0, every_step=True)
+        moment._violation = violation
         while pending:
-            name = policy.choose(sorted(pending))
+            name = policy.choose(moment)
             coroutine, tool, args, fixed = pending[name]
             # A copy of its own for the tool: what it does to a list it is
             # given must not show in the trace.
@@ -482,6 +556,7 @@ def run(
             if violation is None:
                 violation = _first_violation(
                     scenario, world, len(steps), every_step=True)
+                moment._violation = violation
             # Not sooner: an error raised above leaves the agent here to be
             # closed.
             del pending[name]
@@ -574,6 +649,7 @@ def _drawn(
     sampler: Sampler | None,
     draws: list[Drawn],
     steps: Sequence[Step],
+    moment: Moment,
     name: str,
     given: Any,
 ) -> Any:
@@ -583,6 +659,7 @@ def _drawn(
         sampler: The run's sampler, if it has one.
         draws: The draws of the run so far.
         steps: The steps of the run so far.
+        moment: The run as the sampler is shown it.
         name: The agent that draws.
         given: What it asked to draw from.
 
@@ -606,7 +683,7 @@ def _drawn(
     # A copy of its own for the sampler, as a tool gets one of its
     # arguments. A value that was handed back as it is cannot change.
     returned = sampler.sample(
-        name, given if request is given else values.take(request))
+        name, given if request is given else values.take(request), moment)
     try:
         value = values.take(returned)
     except values.NotTakenError as error:

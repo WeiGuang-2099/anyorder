@@ -169,12 +169,12 @@ class _PrefixPolicy:
         self._length = len(prefix)
         self.seen: list[tuple[str, ...]] = []
 
-    def choose(self, waiting: Sequence[str]) -> str:
-        # A copy: the protocol does not promise a fresh list at each step.
+    def choose(self, moment: scheduler.Moment) -> str:
+        waiting = moment.waiting
         self.seen.append(tuple(waiting))
         if len(self.seen) > self._length:
             return waiting[0]
-        return self._replay.choose(waiting)
+        return self._replay.choose(moment)
 
 
 def _next_prefix(

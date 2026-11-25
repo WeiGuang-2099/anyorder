@@ -161,7 +161,8 @@ class _SerialPolicy:
     def __init__(self, order: Sequence[str]) -> None:
         self._order = order
 
-    def choose(self, waiting: Sequence[str]) -> str:
+    def choose(self, moment: scheduler.Moment) -> str:
+        waiting = moment.waiting
         # The first that is waiting: those before it have finished.
         return next(name for name in self._order if name in waiting)
 

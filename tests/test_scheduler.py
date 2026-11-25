@@ -1286,7 +1286,7 @@ class _Listed:
         self._given = iter(given)
         self.asked: list[tuple[str, Any]] = []
 
-    def sample(self, agent: str, request: Any) -> Any:
+    def sample(self, agent: str, request: Any, moment: Any = None) -> Any:
         self.asked.append((agent, request))
         return next(self._given)
 
@@ -1297,7 +1297,8 @@ class _Watching:
     def __init__(self) -> None:
         self.seen: list[tuple[str, ...]] = []
 
-    def choose(self, waiting: Any) -> str:
+    def choose(self, moment: scheduler.Moment) -> str:
+        waiting = moment.waiting
         self.seen.append(tuple(waiting))
         return waiting[0]
 
@@ -1471,7 +1472,9 @@ class _Meddling:
         self.given: list[Any] = []
         self.gave: list[list[str]] = []
 
-    def sample(self, agent: str, request: Any) -> list[str]:
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> list[str]:
         self.given.append(request)
         request.append("meddled")
         self.gave.append(["drawn"])
@@ -1632,7 +1635,9 @@ class _Failing:
     def __init__(self, error: BaseException) -> None:
         self._error = error
 
-    def sample(self, agent: str, request: Any) -> Any:
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> Any:
         raise self._error
 
 
@@ -1699,7 +1704,9 @@ def test_invariants_are_asked_before_an_agent_draws():
     seen = []
 
     class Noting(_Listed):
-        def sample(self, agent: str, request: Any) -> Any:
+        def sample(
+            self, agent: str, request: Any, moment: Any = None
+        ) -> Any:
             seen.append("drew")
             return super().sample(agent, request)
 
@@ -1787,7 +1794,10 @@ def test_seeded_sampler_does_not_draw_from_the_stream_of_its_policy():
     for seed in range(20):
         policy = scheduler.RandomPolicy(seed)
         sampler = scheduler.SeededSampler(seed)
-        chosen = [policy.choose(sides) for _ in range(32)]
+        # A policy looks at who waits and at nothing else of the moment.
+        chosen = [
+            policy.choose(types.SimpleNamespace(waiting=sides))
+            for _ in range(32)]
         drawn = [sampler.sample("a", _COIN) for _ in range(32)]
         # A search gives both the same seed. From one stream, every draw
         # would be tied to a choice of the schedule. Apart, they are
@@ -1915,3 +1925,230 @@ def test_refusal_of_a_draw_shows_no_more_than_the_start_of_a_request():
     assert str(caught.value) == (
         f"draw 1 is from '{'x' * 199}... (502 characters), but agent 'a' "
         f"asks to draw from '{'y' * 199}... (502 characters)")
+
+
+class _Looking:
+    """A policy and a sampler that keep what they are shown.
+
+    As a policy it takes the first waiting agent, and as a sampler it
+    gives the number of the draw.
+
+    Attributes:
+        choices: What the moment showed at each choice.
+        asked: Who drew from what at each draw, and what the moment showed.
+        moments: Every moment it was shown.
+    """
+
+    def __init__(self) -> None:
+        self.choices: list[dict[str, Any]] = []
+        self.asked: list[dict[str, Any]] = []
+        self.moments: list[scheduler.Moment] = []
+
+    def _shown(self, moment: scheduler.Moment) -> dict[str, Any]:
+        self.moments.append(moment)
+        return {
+            "waiting": moment.waiting,
+            "calls": moment.calls,
+            "steps": moment.steps,
+            "draws": moment.draws,
+            "violation": moment.violation,
+        }
+
+    def choose(self, moment: scheduler.Moment) -> str:
+        self.choices.append(self._shown(moment))
+        return moment.waiting[0]
+
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> int:
+        self.asked.append(
+            {"agent": agent, "request": request, **self._shown(moment)})
+        return len(self.asked)
+
+
+def _record(entry: str) -> scheduler.Effect:
+    return scheduler.Effect("record", {"entry": entry})
+
+
+def test_policy_is_shown_who_waits_with_which_call_and_what_has_happened():
+    policy = _Looking()
+    result = scheduler.run(_scenario(), policy)
+    assert result.schedule == ("a", "a", "b", "b")
+    steps = result.steps
+    assert policy.choices == [
+        {"waiting": ["a", "b"],
+         "calls": {"a": _record("a:1"), "b": _record("b:1")},
+         "steps": (), "draws": (), "violation": None},
+        {"waiting": ["a", "b"],
+         "calls": {"a": _record("a:2"), "b": _record("b:1")},
+         "steps": steps[:1], "draws": (), "violation": None},
+        # a has finished: it is no longer among those that wait.
+        {"waiting": ["b"], "calls": {"b": _record("b:1")},
+         "steps": steps[:2], "draws": (), "violation": None},
+        {"waiting": ["b"], "calls": {"b": _record("b:2")},
+         "steps": steps[:3], "draws": (), "violation": None},
+    ]
+    # In name order, the calls as the agents: a file that holds them and a
+    # search that goes by them must not depend on which agent awaited
+    # first.
+    assert list(policy.choices[0]["calls"]) == ["a", "b"]
+
+
+def test_policy_is_shown_the_agents_in_name_order_whoever_waited_first():
+    async def late(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("record", entry="first")
+        await ctx.call("record", entry="second")
+
+    policy = _Looking()
+    # After its first call a waits again, and it is b that has waited
+    # longest.
+    scheduler.run(_scenario(a=late, b=_writer), policy)
+    assert policy.choices[1]["waiting"] == ["a", "b"]
+    assert list(policy.choices[1]["calls"]) == ["a", "b"]
+
+
+def test_policy_that_changes_what_it_is_shown_changes_nothing_of_the_run():
+    class Meddler:
+        def choose(self, moment: scheduler.Moment) -> str:
+            waiting = moment.waiting
+            calls = moment.calls
+            # Its own list and its own copies: none of this is the run's.
+            for call in calls.values():
+                call.args.setdefault("items", []).append("meddled")
+                call.args["more"] = 1
+            calls.clear()
+            first = waiting[0]
+            waiting.clear()
+            return first
+
+    async def keeper(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("keep", items=["mine"])
+        await ctx.call("kept_size")
+
+    worlds: list[_Shelf] = []
+    result = scheduler.run(_shelf(worlds, a=keeper, b=keeper), Meddler())
+    assert _shown(result) == [
+        ("keep", {"items": ["mine"]}, None),
+        ("kept_size", {}, 1),
+        ("keep", {"items": ["mine"]}, None),
+        ("kept_size", {}, 1),
+    ]
+    assert worlds[0].kept == ["mine"]
+
+
+def test_moment_gives_what_it_shows_anew_each_time_it_is_asked():
+    seen = []
+
+    class Asker:
+        def choose(self, moment: scheduler.Moment) -> str:
+            seen.append((
+                moment.waiting, moment.waiting, moment.calls, moment.calls))
+            return moment.waiting[0]
+
+    async def keeper(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("keep", items=["mine"])
+
+    scheduler.run(_shelf(a=keeper), Asker())
+    waiting, again, calls, calls_again = seen[0]
+    assert waiting == again and waiting is not again
+    assert calls == calls_again and calls is not calls_again
+    assert calls["a"].args["items"] is not calls_again["a"].args["items"]
+
+
+def test_moment_shows_the_run_as_it_stands_when_it_is_looked_at():
+    policy = _Looking()
+    result = scheduler.run(_scenario(), policy)
+    # One moment for the whole run. It keeps nothing: looked at once the
+    # run is over, it shows the run as it ended.
+    assert len({id(moment) for moment in policy.moments}) == 1
+    moment = policy.moments[0]
+    assert moment.waiting == [] and moment.calls == {}
+    assert moment.steps == result.steps
+    # What was taken from it at a choice is as it was then.
+    assert policy.choices[0]["steps"] == ()
+
+
+def test_policy_is_shown_the_first_violation_from_the_step_that_broke_it():
+    policy = _Looking()
+    result = scheduler.run(_lamp(3, _ALWAYS_DARK), policy)
+    broken = scheduler.Violation("always-dark", "the lamp is lit", 1)
+    assert result.violation == broken
+    # Lit after the first switch, dark after the second and lit again:
+    # the first violation stays the one that is shown.
+    assert [choice["violation"] for choice in policy.choices] == [
+        None, broken, broken]
+
+
+def test_policy_is_shown_a_violation_of_the_fresh_world():
+    policy = _Looking()
+    scheduler.run(_lamp(1, _ALWAYS_DARK, lit=True), policy)
+    assert [choice["violation"] for choice in policy.choices] == [
+        scheduler.Violation("always-dark", "the lamp is lit", 0)]
+
+
+def test_policy_is_not_shown_what_is_asked_only_at_the_end():
+    policy = _Looking()
+    result = scheduler.run(_lamp(1, _DARK_AT_END), policy)
+    assert result.violation is not None
+    assert [choice["violation"] for choice in policy.choices] == [None]
+
+
+def test_sampler_is_shown_the_run_as_it_stands_at_the_draw():
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("start")
+        await ctx.call("record", entry=ctx.name)
+        await ctx.draw("after")
+        await ctx.draw("again")
+
+    looking = _Looking()
+    result = scheduler.run(
+        _scenario(a=drawer, b=_writer), scheduler.ReplayPolicy(["a", "b", "b"]),
+        looking)
+    first, second, third = result.draws
+    assert looking.asked == [
+        # Before any call. a is started first and draws before it waits,
+        # and b is not started yet: nobody waits.
+        {"agent": "a", "request": "start", "waiting": [], "calls": {},
+         "steps": (), "draws": (), "violation": None},
+        # After a's call. The step is among the steps, the draw that is
+        # being made is not among the draws, and the agent that draws is
+        # not among those that wait.
+        {"agent": "a", "request": "after", "waiting": ["b"],
+         "calls": {"b": _record("b:1")}, "steps": result.steps[:1],
+         "draws": (first,), "violation": None},
+        {"agent": "a", "request": "again", "waiting": ["b"],
+         "calls": {"b": _record("b:1")}, "steps": result.steps[:1],
+         "draws": (first, second), "violation": None},
+    ]
+    assert (first.value, second.value, third.value) == (1, 2, 3)
+
+
+def test_sampler_is_shown_a_violation_of_the_step_its_agent_just_took():
+    async def switcher(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("before")
+        await ctx.call("switch")
+        await ctx.draw("after")
+
+    looking = _Looking()
+    scenario = dataclasses.replace(
+        _lamp(0, _ALWAYS_DARK), agents={"a": switcher})
+    scheduler.run(scenario, scheduler.ReplayPolicy(["a"]), looking)
+    assert [asked["violation"] for asked in looking.asked] == [
+        None, scheduler.Violation("always-dark", "the lamp is lit", 1)]
+
+
+def test_draw_before_the_first_call_is_made_before_the_fresh_world_is_asked():
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("start")
+        await ctx.call("switch")
+
+    looking = _Looking()
+    scenario = dataclasses.replace(
+        _lamp(0, _ALWAYS_DARK, lit=True), agents={"a": drawer})
+    result = scheduler.run(scenario, looking, looking)
+    # Agents are started, and draw, before the fresh world is asked. So
+    # the sampler is shown no violation where the policy, asked next, is.
+    assert result.violation == scheduler.Violation(
+        "always-dark", "the lamp is lit", 0)
+    assert looking.asked[0]["violation"] is None
+    assert looking.choices[0]["violation"] == result.violation

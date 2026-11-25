@@ -872,7 +872,9 @@ class _Given:
     def __init__(self, value: Any) -> None:
         self._value = value
 
-    def sample(self, agent: str, request: Any) -> Any:
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> Any:
         return self._value
 
 
@@ -1743,7 +1745,9 @@ class _Counted:
     def __init__(self) -> None:
         self._numbers = itertools.count(1)
 
-    def sample(self, agent: str, request: Any) -> int:
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> int:
         return next(self._numbers)
 
 

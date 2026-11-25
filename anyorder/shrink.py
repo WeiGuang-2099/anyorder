@@ -137,7 +137,8 @@ class _FollowPolicy:
     def __init__(self, order: Sequence[str]) -> None:
         self._order = iter(order)
 
-    def choose(self, waiting: Sequence[str]) -> str:
+    def choose(self, moment: scheduler.Moment) -> str:
+        waiting = moment.waiting
         for name in self._order:
             if name in waiting:
                 return name
