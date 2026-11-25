@@ -23,6 +23,43 @@ from anyorder.scenarios import write_skew
 _NO_ARGS = ("dict", ())
 
 
+class _StepLimitError(scheduler.SchedulerError):
+    """A run made more calls than its test allows."""
+
+
+class _Limited:
+    """A world that refuses the call after the last one it allows.
+
+    The compare-and-set editors and doctors try again after a refusal, and
+    one that did so wrongly would never end. With this a run of theirs
+    fails its test where it would hang it. A third copy, after those of
+    the tests of the two scenarios.
+    """
+
+    def __init__(self, world: Any, calls: int) -> None:
+        self._world = world
+        self._left = calls
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._world, name)
+        if not callable(value):
+            return value
+
+        def tool(**args: Any) -> Any:
+            if not self._left:
+                raise _StepLimitError(f"no call is left for {name!r}")
+            self._left -= 1
+            return value(**args)
+
+        return tool
+
+
+def _limited(scenario: scheduler.Scenario, calls: int) -> scheduler.Scenario:
+    """The scenario with a world that allows this many calls in a run."""
+    return dataclasses.replace(
+        scenario, make_world=lambda: _Limited(scenario.make_world(), calls))
+
+
 class _Counter:
     """A counter and a list of notes."""
 
@@ -621,10 +658,15 @@ def test_two_naive_buyers_stand_at_17_configurations():
         (oversell.naive(stock=2, buyers=2), 20),
         (oversell.atomic(stock=1, buyers=3), 6),
         (lost_update.naive(editors=3), 90),
-        (lost_update.cas(editors=3), 498),
+        # The builds whose agents try again go through the guard, with
+        # the calls of their longest run: 3 * 4 for the editors, as the
+        # tests of the lost update derive, and two calls a doctor. The
+        # control of the write skew is guarded with them, at the one call
+        # each of its doctors makes.
+        (_limited(lost_update.cas(editors=3), 12), 498),
         (write_skew.naive(doctors=3), 90),
-        (write_skew.cas(doctors=3), 90),
-        (write_skew.atomic(doctors=3), 6),
+        (_limited(write_skew.cas(doctors=3), 6), 90),
+        (_limited(write_skew.atomic(doctors=3), 3), 6),
     ],
     ids=lambda value: getattr(value, "name", None))
 def test_runs_at_one_configuration_go_on_alike(scenario, schedules):
