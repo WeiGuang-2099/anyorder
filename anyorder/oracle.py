@@ -135,12 +135,19 @@ def judge(serial: SerialOutcomes, result: scheduler.RunResult) -> Verdict:
         The run's outcome and the serial orders that end in it.
 
     Raises:
+        ValueError: The run made draws. A run that drew is not judged yet:
+            the serial orders would have to be run under its draws, and
+            nothing gives those to an order that asks for other draws.
+            Nothing has run.
         ReplayDivergenceError: The run did not replay to the same trace, or
             it failed and ended in another state when it was run again.
             Either the run is not one of this scenario, or the scenario is
             not deterministic.
         TypeError: The snapshot gave a value that cannot be hashed.
     """
+    if result.draws:
+        raise ValueError(
+            "the run made draws, and a run that drew is not judged yet")
     scenario = serial.scenario
     outcome = _replayed(scenario, result)
     orders = serial.orders.get(outcome, ())

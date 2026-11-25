@@ -784,3 +784,59 @@ def test_run_is_judged_with_the_snapshot_of_the_scenario_it_is_a_run_of():
     assert serial.orders == {0: (_B1_B2, _B2_B1)}
     lost = explore.replay(scenario, _BOTH_READ_FIRST)
     assert oracle.judge(serial, lost) == oracle.Verdict(1, ())
+
+
+def test_run_that_drew_is_not_judged():
+    built = []
+
+    class Dial:
+        """A number that can be read, turned up by one and set."""
+
+        def __init__(self) -> None:
+            built.append(self)
+            self.value = 0
+
+        def read(self) -> int:
+            return self.value
+
+        def turn(self) -> None:
+            self.value += 1
+
+        def mark(self, value: int) -> None:
+            self.value = value
+
+    class Seven:
+        def sample(
+            self, agent: str, request: object, moment: scheduler.Moment
+        ) -> int:
+            return 7
+
+    async def watcher(ctx: scheduler.AgentContext) -> None:
+        before = await ctx.call("read")
+        after = await ctx.call("read")
+        # Only when somebody turned the dial between its two reads, which
+        # happens in no serial order.
+        if before != after:
+            await ctx.call("mark", value=await ctx.draw("coin"))
+
+    async def turner(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("turn")
+
+    scenario = scheduler.Scenario(
+        name="dial", make_world=Dial, agents={"a": watcher, "b": turner},
+        invariants=(), snapshot=lambda dial: dial.value)
+    # No agent draws in a serial order, so the scenario has its serial
+    # outcomes. A run of it can still draw.
+    serial = oracle.serial_outcomes(scenario)
+    run = scheduler.run(scenario, scheduler.ReplayPolicy("abaa"), Seven())
+    assert len(run.draws) == 1
+    built.clear()
+    # The serial orders would have to be run under the draws of the run,
+    # which nothing gives them yet. Said so, and before anything runs: a
+    # replay without the draws would call it a run that left its draws.
+    with pytest.raises(
+            ValueError,
+            match="^the run made draws, and a run that drew is not judged "
+                  "yet$"):
+        oracle.judge(serial, run)
+    assert not built
