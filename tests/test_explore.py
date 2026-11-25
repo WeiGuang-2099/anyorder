@@ -646,8 +646,7 @@ def test_exhaustive_search_holds_each_run_against_its_steps():
 
 
 class _SetsAfter:
-    """A table of the tests' own for the counter: whether a sets, by what
-    it read."""
+    """A table of the tests' own: whether a sets, by what it read."""
 
     def __init__(self, *sets: bool) -> None:
         self._sets = sets
@@ -705,7 +704,7 @@ def test_exhaustive_search_under_a_table_needs_three_draws_for_all_it_runs():
 def test_exhaustive_search_refuses_a_sampler_that_is_no_table():
     # A seeded sampler draws in the order it is asked, and the search
     # asks it again in every run. With seed 0 it has a stop after it read
-    # 0 in one run and set in another.
+    # 2 in one run and a set after it read 2 in another.
     with pytest.raises(scheduler.ReplayDivergenceError) as caught:
         list(explore.exhaust(_counting(), scheduler.SeededSampler(0)))
     assert str(caught.value) == (

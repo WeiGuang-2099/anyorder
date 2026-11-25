@@ -169,7 +169,7 @@ async def _adder_twice(ctx: scheduler.AgentContext) -> None:
 def test_local_history_at_a_draw_is_without_the_draw_that_is_being_made():
     following = _Following("aab", "x", "y", "z")
     scheduler.run(_counter(a=_busy, b=_adder), following, following)
-    note =("call", "note", ("dict", (("text", "a drew x"),)), None)
+    note = ("call", "note", ("dict", (("text", "a drew x"),)), None)
     assert following.histories == [
         ("a", ()),
         ("a", (("draw", "start", "x"), note)),
