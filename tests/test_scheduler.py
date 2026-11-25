@@ -174,6 +174,27 @@ def test_schedule_decides_the_order_of_tool_calls():
     assert result.schedule == ("b", "a", "a", "b")
 
 
+@pytest.mark.parametrize(
+    "listed", ["abc", "cab", "cba"], ids=["sorted", "mixed", "reversed"])
+def test_agents_are_started_in_name_order_however_they_are_listed(listed):
+    started = []
+
+    async def starter(ctx: scheduler.AgentContext) -> None:
+        # Before its first call, so this runs when the agent is started.
+        started.append(ctx.name)
+        await ctx.call("record", entry=ctx.name)
+
+    async def idler(ctx: scheduler.AgentContext) -> None:
+        # Makes no call, and is started in its place all the same.
+        started.append(ctx.name)
+
+    agents = {name: starter for name in listed}
+    scenario = _scenario(**agents, bb=idler)
+    assert list(scenario.agents) == [*listed, "bb"]
+    scheduler.run(scenario, scheduler.RandomPolicy(0))
+    assert started == ["a", "b", "bb", "c"]
+
+
 def test_agent_receives_the_tool_result():
     async def counter(ctx: scheduler.AgentContext) -> None:
         size = await ctx.call("size")

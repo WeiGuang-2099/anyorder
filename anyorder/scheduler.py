@@ -117,7 +117,8 @@ class Scenario:
         name: Short identifier for reports.
         make_world: Builds a fresh world for each run. A world shared
             between runs breaks replay.
-        agents: Agent functions by name.
+        agents: Agent functions by name. A run starts them in name order,
+            whatever order they are listed in.
         invariants: What must stay true of the world. Each says when it
             must hold.
     """
@@ -259,7 +260,11 @@ def run(scenario: Scenario, policy: Policy) -> RunResult:
     pending: _Pending = {}
     steps: list[Step] = []
     try:
-        for name, agent in scenario.agents.items():
+        # In name order, as a policy is shown the waiting agents: what an
+        # agent does before its first call must not depend on the order a
+        # scenario happens to list its agents in.
+        for name in sorted(scenario.agents):
+            agent = scenario.agents[name]
             _advance(pending, name, agent(AgentContext(name)), None)
         violation = _first_violation(scenario, world, 0, every_step=True)
         while pending:
