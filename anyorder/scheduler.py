@@ -70,9 +70,11 @@ class UnsupportedValueError(SchedulerError):
     """A value cannot be used where it was given.
 
     An argument or a result of a call, or what a draw asked for or was
-    given, is not a value a call carries. Or a sampler was asked to draw
-    from what it does not draw from. Or the name of an agent or of a tool
-    is not a string and nothing more.
+    given, is not a value a call carries, or the arguments of a call are
+    no mapping. Or a sampler was asked to draw from what it does not draw
+    from, or where it cannot draw: a table sampler at a place it cannot
+    write out. Or the name of an agent or of a tool, or the name a policy
+    chooses, is not a string and nothing more.
     """
 
 
@@ -188,8 +190,11 @@ class Scenario:
             hashed and that is equal for two worlds in the same state,
             such as a tuple of numbers and strings. It says everything
             of the world that a later call or a later check can go by:
-            two worlds with one state go on alike. A scenario that is
-            never asked for the state of its world needs none.
+            two worlds with one state go on alike. States are held as
+            Python compares, so where a tool can hand back a value that
+            the world stores, the state must keep True, 1 and 1.0 apart
+            itself, as values.key does. A scenario that is never asked
+            for the state of its world needs none.
     """
 
     name: str

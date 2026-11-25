@@ -28,8 +28,8 @@ Early. What works today:
   refused, not tolerated. Given the steps of the run it replays, a replay
   holds each call against its step before the call is made.
 * Configurations. Where a run stands, the state of its world and what
-  each waiting agent has seen and done, is a value that a search can look
-  up by.
+  each agent that waits or draws has seen and done, is a value that a
+  search can look up by.
 * Shrinking of a failing schedule toward fewer context switches, then fewer
   agents.
 * Trace files. A run is written as JSON lines, read back and replayed. A
@@ -152,8 +152,9 @@ entries do, so both writes go through.
 * A policy is shown the run as it stands, as a `Moment`: the agents that
   wait, the call each of them waits to make, every step and draw so far,
   the first violation so far and, where the scenario has a snapshot, the
-  state of the world. A sampler is shown the same at a draw. The moment
-  shows the run when it is looked at and costs nothing until then.
+  state of the world. A sampler is shown the same at a draw, and which
+  agent draws. The moment shows the run when it is looked at and costs
+  nothing until then.
 * A call is by value. An argument is taken when the agent awaits the call
   and a result when the tool returns. The tool, the agent and the trace
   each get a copy of their own of every list and dict in it, at any depth,
@@ -183,10 +184,11 @@ entries do, so both writes go through.
 * `configuration.local_history` gives what an agent has done and been
   given so far, its own calls and draws in order. `configuration.at`
   gives the configuration a run stands at: the state of the world and the
-  local history of every agent that still waits. Two runs at one
-  configuration go on alike under the same choices and draws. A value in
-  them is held by `values.key`, which tells True from 1 as a trace file
-  does.
+  local history of every agent that still waits and, at a draw, of the
+  agent that draws. Two runs at one configuration go on alike under the
+  same choices and draws. A value in a history is held by `values.key`,
+  which tells True from 1 as a trace file does and keeps the order of a
+  dict's keys. The state is whatever the snapshot gives.
 * `configuration.TableSampler` holds one draw for each agent, local
   history and request, made from its seed and that place alone. Under one
   table the agents are a program with no chance left in it, so every
@@ -300,7 +302,8 @@ none.
   what it asks for and in what it is given, and an error of a sampler
   ends the run as well: unlike a tool's, it is never handed to the agent.
   So does the name of an agent or of a tool that is not a string and
-  nothing more, such as an instance of a subclass of str.
+  nothing more, such as an instance of a subclass of str, and so does a
+  policy that chooses such a name.
 * The seeded sampler makes its draws from one stream, in the order they
   are asked for. So what an agent draws depends on the draws made before
   it, by any agent, and the same seed can give an agent another sample
@@ -308,13 +311,16 @@ none.
   sampler does not, and an exhaustive search of a scenario that draws
   takes one: it refuses a sampler that gives an agent two draws at one
   place, by the place or because the run cannot follow the start of its
-  schedule. Shrinking and the serial-equivalence oracle do not run a
-  scenario whose agents draw yet: `shrink.shrink` refuses a run that made
-  draws before it runs anything, and the oracle ends with an error at the
-  first draw.
+  schedule. Shrinking and the serial-equivalence oracle do not take a
+  scenario whose agents draw yet: `shrink.shrink` and `oracle.judge`
+  refuse a run that made draws before they run anything, and
+  `oracle.serial_outcomes` ends with an error at the first draw.
 * A table sampler seeds a generator for every draw it has not made yet,
-  with the local history of the agent written out. That costs far more
-  than a draw of the seeded sampler, once for each place.
+  with the local history of the agent written out, which costs far more
+  than a draw of the seeded sampler. And at every draw, held or not, it
+  reads the agent's history off the run so far. A place that holds an
+  integer too long for Python to write as text has no draw in a table,
+  and the run ends there.
 * A moment shows a run when it is looked at. A policy that holds on to it
   sees the run move on. The steps and the draws it gives are the run's
   own records and must not be changed, where the calls it gives are
@@ -323,8 +329,12 @@ none.
   that leaves out something a later call or check goes by makes two runs
   stand at one configuration and go on otherwise, and nothing here tells.
   The tests ask it of the three examples: over every schedule, runs at
-  one configuration make the same steps from there. A configuration does
-  not say whether an invariant broke on the way, which the moment does.
+  one configuration make the same steps from there and break the same
+  invariant as many steps on. A state is held as Python compares, which
+  takes True, 1 and 1.0 for equal: a snapshot that gives a value a tool
+  can hand back must keep those apart, as `values.key` does. A
+  configuration does not say whether an invariant broke on the way, which
+  the moment does.
 * A replay gives a draw back as it was recorded and does not ask whether a
   sampler could have given it. A trace file that holds a draw of 1 where
   the outcomes are True and False replays, if the run that comes of the 1
@@ -344,7 +354,12 @@ none.
   a trace file lets it be. Taking a value near that bound needs about a
   hundred calls of Python's stack, and twice as many before Python 3.12,
   so a run that is started from deep inside other calls can end in a
-  RecursionError where a shallower value would run.
+  RecursionError where a shallower value would run. The key of such a
+  value, which a table sampler and a configuration make, needs about two
+  hundred under every Python. Before Python 3.12 a table sampler, and
+  whatever looks a configuration up, needs up to about a hundred more for
+  a dict nested that deep: writing a place out and comparing two keys
+  count there as well.
 * Agents that share an object outside every call, such as a list both
   were built with, still share it. The scheduler sees calls and nothing
   else.
@@ -416,8 +431,9 @@ none.
   over, not call by call. A scenario that is not the file's can make
   every call of the schedule before it is refused. A replay from the
   steps of a run in memory is checked call by call, for the tool and the
-  arguments as Python compares them. The results are compared once the
-  run is over.
+  arguments as Python compares them. `explore.replay` holds no result
+  against a step: whoever replays, as the searches and the oracle do,
+  holds the run it gets against the run it replayed once it is over.
 * A tool's error is kept as the text Python gives it. That text can
   differ between versions of Python, and then a file that holds one does
   not replay on the other version.

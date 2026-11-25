@@ -194,8 +194,8 @@ def replay(
             f"the run made {len(result.draws)} draws but {len(draws)} were "
             "given")
     for number, (made, held) in enumerate(zip(result.draws, draws), start=1):
-        # The sampler is not told where a run stands, so this is seen
-        # only now.
+        # The sampler that replays does not look at where the run stands,
+        # so this is seen only now.
         if made.step != held.step:
             raise scheduler.ReplayDivergenceError(
                 f"draw {number} was made after {made.step} steps, not after "

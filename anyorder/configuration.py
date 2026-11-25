@@ -28,7 +28,8 @@ the moment for the violation as well.
 A table sampler gives one draw for each agent and local history. Under it
 an agent draws the same wherever it has seen and done the same, so a draw
 that was made once serves every schedule that comes to that place: all the
-schedules of a scenario need no more draws than there are places.
+schedules of a scenario need no more draws than there are places. A draw
+still costs a reading of the run so far, for the history of its agent.
 
 Outside the scheduler: all of this is read off a Moment, or for the places
 of a run off the run.
@@ -51,7 +52,7 @@ Event = tuple[Hashable, ...]
 
 @dataclasses.dataclass(frozen=True)
 class Configuration:
-    """The state of a world and what each waiting agent has seen and done.
+    """Where a run stands: the state of its world and its agents' histories.
 
     It can be hashed. Two runs that stand at equal configurations go on
     alike.

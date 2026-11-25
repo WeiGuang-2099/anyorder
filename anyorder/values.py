@@ -20,6 +20,7 @@ that holds itself, and it must end at the same depth under every Python.
 take calls itself once for each level, so a value near the bound needs
 about a hundred calls of Python's stack, and twice as many before Python
 3.12: taken from deep inside other calls it can end in a RecursionError.
+key needs about two calls for each level under every Python.
 
 key gives a hashable that stands for a value as a trace file writes it:
 two values have one key exactly when a file writes them alike. Python
@@ -226,8 +227,8 @@ def shown(value: Any) -> str:
     try:
         shown = repr(value)
     except Exception:
-        # Python cannot show it, or its own repr raises. No call carries
-        # it either way, and the refusal must not be another error.
+        # Python cannot show it, as an integer too long to write, or its
+        # own repr raises. The refusal must not be another error.
         return "a value that cannot be shown"
     if type(shown) is not str:
         # A repr can be of a subclass of str, which has its own say in
