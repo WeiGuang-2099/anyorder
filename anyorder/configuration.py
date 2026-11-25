@@ -145,15 +145,27 @@ class TableSampler:
         """Returns the draw of the place the agent stands at.
 
         Raises:
-            UnsupportedValueError: The request is no written distribution.
+            UnsupportedValueError: The request is no written distribution,
+                or the place holds an integer too long for this Python to
+                write, and with that no draw.
         """
         place = (
             agent, local_history(moment, agent), values.key(request))
         if place not in self.held:
-            # Written with ascii: how Python shows a character outside
-            # it depends on the version.
-            rng = random.Random(
-                f"anyorder table {self._seed} {ascii(place)}")
+            try:
+                # Written with ascii: how Python shows a character outside
+                # it depends on the version.
+                written = ascii(place)
+            except ValueError:
+                # A call carries an integer of any length, and Python
+                # writes none above a number of digits that is its own
+                # to set.
+                raise scheduler.UnsupportedValueError(
+                    f"agent {agent!r} cannot draw from a table: where it "
+                    "stands holds an integer too long for this Python to "
+                    "write, and a table writes a place out to seed its "
+                    "draw") from None
+            rng = random.Random(f"anyorder table {self._seed} {written}")
             self.held[place] = scheduler.pick(agent, request, rng)
         return self.held[place]
 

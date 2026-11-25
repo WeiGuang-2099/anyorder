@@ -7,6 +7,7 @@ one configuration go on alike.
 """
 
 import dataclasses
+import sys
 from collections.abc import Hashable, Sequence
 from typing import Any
 
@@ -539,6 +540,41 @@ def test_agent_that_goes_by_the_order_of_a_dict_stands_at_another_place():
     assert x_run.steps[1].args != y_run.steps[1].args
     assert by_x.stood[1].state == by_y.stood[1].state
     assert by_x.stood[1] != by_y.stood[1]
+
+
+@pytest.mark.skipif(
+    not getattr(sys, "get_int_max_str_digits", lambda: 0)(),
+    reason="this Python writes an integer of any length")
+@pytest.mark.parametrize("where", ["history", "request"])
+def test_table_refuses_a_place_that_this_python_cannot_write(where):
+    # Twice the digits that this Python writes: just above the limit it
+    # can still write an integer, where the limit is set high.
+    huge = 10 ** (2 * sys.get_int_max_str_digits())
+
+    class Teller:
+        def tell(self) -> int:
+            return huge if where == "history" else 1
+
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("tell")
+        await ctx.draw(_COIN if where == "history" else (("heads", huge),))
+
+    scenario = scheduler.Scenario(
+        name="teller", make_world=Teller, agents={"a": asker},
+        invariants=())
+    # A call carries the integer, and so the run is made up to the draw.
+    # The table writes a place out to seed its draw, which this Python
+    # refuses: said as a refusal of the scheduler's, with the agent.
+    table = configuration.TableSampler(0)
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        scheduler.run(scenario, scheduler.ReplayPolicy(["a"]), table)
+    assert str(caught.value) == (
+        "agent 'a' cannot draw from a table: where it stands holds an "
+        "integer too long for this Python to write, and a table writes a "
+        "place out to seed its draw")
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert table.held == {}
 
 
 def _configurations(
