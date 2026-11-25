@@ -728,8 +728,23 @@ def test_scenario_of_the_package_brings_the_snapshot_of_its_world(
     scenario, snapshot
 ):
     assert scenario.snapshot is snapshot
-    # And the oracle goes by it: every serial order of every one of them
-    # has an outcome.
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        oversell.naive(),
+        oversell.atomic(),
+        lost_update.naive(),
+        write_skew.naive(),
+    ],
+    ids=lambda scenario: scenario.name)
+def test_serial_outcomes_hold_the_scenario_they_were_given(scenario):
+    # The oracle goes by the snapshot a scenario brings: every serial
+    # order of these has an outcome. The compare-and-set builds and the
+    # control of the write skew are not run here, where nothing guards a
+    # run: the tests of their scenarios ask for their serial outcomes
+    # behind a guard.
     serial = oracle.serial_outcomes(scenario)
     assert serial.scenario is scenario
     assert sum(len(orders) for orders in serial.orders.values()) == 2
