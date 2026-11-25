@@ -94,6 +94,7 @@ class _Following:
 
     Attributes:
         stood: The configuration at each choice.
+        broken: The first violation so far at each choice.
         histories: The local history of the agent that drew, at each draw.
         moment: The moment of the run, which goes on showing the run.
     """
@@ -102,12 +103,14 @@ class _Following:
         self._schedule = iter(schedule)
         self._given = iter(given)
         self.stood: list[configuration.Configuration] = []
+        self.broken: list[scheduler.Violation | None] = []
         self.histories: list[tuple[str, Hashable]] = []
         self.moment: scheduler.Moment | None = None
 
     def choose(self, moment: scheduler.Moment) -> str:
         self.moment = moment
         self.stood.append(configuration.at(moment))
+        self.broken.append(moment.violation)
         return next(self._schedule)
 
     def sample(
@@ -621,19 +624,30 @@ def _configurations(
 
     Returns:
         The number of schedules, and for each configuration that a run
-        stood at with the rest of its schedule, the steps that followed.
-        Two runs at one configuration under one rest of a schedule must
-        have made the same steps from there: that is asked here.
+        stood at with the rest of its schedule, what followed.
+
+    Two runs at one configuration under one rest of a schedule must go on
+    alike, and that is asked here of what a later call goes by and of
+    what a later check goes by: they must make the same steps from there,
+    and if neither had broken an invariant when it stood there, they must
+    break the same one, with the same words, as many steps on.
     """
     followed: dict[Hashable, Any] = {}
+    still_whole: dict[Hashable, Any] = {}
     runs = list(explore.exhaust(scenario))
     for run in runs:
-        stood = _stood(scenario, run.schedule)
-        assert len(stood) == len(run.steps)
-        for index, where in enumerate(stood):
+        following = _Following(run.schedule)
+        assert scheduler.run(scenario, following) == run
+        assert len(following.stood) == len(run.steps)
+        for index, where in enumerate(following.stood):
             rest = (where, run.schedule[index:])
             assert followed.setdefault(rest, run.steps[index:]) == (
                 run.steps[index:])
+            if following.broken[index] is not None:
+                continue
+            ends = run.violation and dataclasses.replace(
+                run.violation, step=run.violation.step - index)
+            assert still_whole.setdefault(rest, ends) == ends
     return len(runs), followed
 
 
