@@ -2509,6 +2509,10 @@ class _MaskedBox(metaclass=_CalledStr):
         return value
 
 
+class _MaskedWorld(metaclass=_CalledStr):
+    """A world with no tool."""
+
+
 def test_refusal_names_a_type_as_type_gives_it_whatever_the_class_says():
     assert _Masked.__name__ == "str"
 
@@ -2520,6 +2524,9 @@ def test_refusal_names_a_type_as_type_gives_it_whatever_the_class_says():
 
     async def packer(ctx: scheduler.AgentContext) -> None:
         await scheduler.Effect("record", _MaskedBox())
+
+    async def lost(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("missing")
 
     cases = [
         (scheduler.Scenario(
@@ -2535,11 +2542,98 @@ def test_refusal_names_a_type_as_type_gives_it_whatever_the_class_says():
         (_scenario(a=packer),
          "agent 'a' cannot call 'record': its arguments are of type "
          "_MaskedBox, not a mapping"),
+        (scheduler.Scenario("bare", _MaskedWorld, {"a": lost}, ()),
+         "_MaskedWorld has no tool 'missing'"),
     ]
     for scenario, message in cases:
         with pytest.raises(scheduler.SchedulerError) as caught:
             scheduler.run(scenario, scheduler.RandomPolicy(0))
         assert str(caught.value) == message
+
+
+class _MaskedError(Exception, metaclass=_CalledStr):
+    """An error whose class says that it is called str."""
+
+
+def test_tool_error_is_of_the_kind_type_gives_whatever_the_class_says():
+    assert _MaskedError.__name__ == "str"
+
+    class Failing:
+        """A world whose one tool raises."""
+
+        def fail(self) -> None:
+            raise _MaskedError("no")
+
+    given = []
+
+    async def caller(ctx: scheduler.AgentContext) -> None:
+        given.append(await ctx.call("fail"))
+
+    scenario = scheduler.Scenario("failing", Failing, {"a": caller}, ())
+    result = scheduler.run(scenario, scheduler.RandomPolicy(0))
+    # The kind is the name of the error's class, and a trace file holds
+    # it: it is not the class's to say.
+    raised = scheduler.Raised("_MaskedError", "no")
+    assert given == [raised]
+    assert [step.result for step in result.steps] == [raised]
+
+
+class _Stubborn(str):
+    """A string with a say of its own in how it is written out."""
+
+    def __str__(self) -> str:
+        return self
+
+    def __format__(self, spec: str) -> str:
+        return "LOUD"
+
+
+def test_refusal_names_a_class_whose_name_is_more_than_a_string_plainly():
+    # A class can be made with a name of a subclass of str, and it holds
+    # that name as it was given. A refusal names the class by the text of
+    # the name and does not ask the name how it would be written.
+    bare = type(_Stubborn("Bare"), (), {"__repr__": lambda self: "bare"})
+    assert type(bare.__name__) is _Stubborn
+    assert f"{bare.__name__}" == "LOUD"
+    assert type(values.name_of(bare)) is str
+
+    async def lost(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("missing")
+
+    with pytest.raises(scheduler.UnknownToolError) as caught:
+        scheduler.run(
+            scheduler.Scenario("bare", bare, {"a": lost}, ()),
+            scheduler.RandomPolicy(0))
+    assert str(caught.value) == "Bare has no tool 'missing'"
+    with pytest.raises(values.NotTakenError) as caught:
+        values.take(bare())
+    assert str(caught.value) == "a call does not carry bare, of type Bare"
+    with pytest.raises(values.NotTakenError) as caught:
+        values.key(bare())
+    assert str(caught.value) == "a call does not carry bare, of type Bare"
+
+
+def test_kind_of_a_tool_error_is_plain_whatever_the_name_of_its_class_is():
+    boom = type(_Stubborn("Boom"), (Exception,), {})
+    assert type(boom.__name__) is _Stubborn
+
+    class Failing:
+        """A world whose one tool raises."""
+
+        def fail(self) -> None:
+            raise boom("no")
+
+    async def caller(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("fail")
+        await ctx.call("fail")
+
+    scenario = scheduler.Scenario("failing", Failing, {"a": caller}, ())
+    result = scheduler.run(scenario, scheduler.RandomPolicy(0))
+    error = result.steps[0].result
+    assert error == scheduler.Raised("Boom", "no")
+    assert type(error.kind) is str
+    # The agent was given the error as a result and went on.
+    assert len(result.steps) == 2
 
 
 class _Shifty(Mapping):

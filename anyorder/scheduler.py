@@ -927,7 +927,7 @@ def _apply(world: Any, name: str, args: Mapping[str, Any]) -> Any:
         tool = getattr(world, name, None)
     if not callable(tool):
         raise UnknownToolError(
-            f"{type(world).__name__} has no tool {name!r}")
+            f"{values.name_of(type(world))} has no tool {name!r}")
     try:
         return tool(**args)
     except SchedulerError:
@@ -935,14 +935,14 @@ def _apply(world: Any, name: str, args: Mapping[str, Any]) -> Any:
         # that left its schedule.
         raise
     except Exception as error:
-        return Raised(_plain(type(error).__name__), _plain(str(error)))
+        return Raised(values.name_of(type(error)), _plain(str(error)))
 
 
 def _plain(text: str) -> str:
     """Returns a text as a str and nothing more.
 
-    An error can give its name or its text as an instance of a subclass of
-    str, and no call carries one.
+    An error can give its text as an instance of a subclass of str, and no
+    call carries one.
     """
     return text if type(text) is str else str.__str__(text)
 

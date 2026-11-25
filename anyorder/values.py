@@ -53,10 +53,20 @@ ROOM = _LINE_LEVELS - 1
 # A refusal shows the value it refuses, and no more of it than this.
 _SHOWN = 200
 
-# The name of a class as type itself gives it, whatever the class or its
-# metaclass says its name is. For a refusal to name the type of what it
-# refuses.
-name_of = type.__dict__["__name__"].__get__
+# The name of a class as type itself holds it, whatever the class or its
+# metaclass says its name is.
+_held_name = type.__dict__["__name__"].__get__
+
+
+def name_of(kind: type) -> str:
+    """Returns the name of a class, for a refusal or a tool's error to give.
+
+    As type itself holds it, and as a str and nothing more: a class can
+    be made with a name of a subclass of str, which would have its own
+    say in how it is put into a message.
+    """
+    name = _held_name(kind)
+    return name if type(name) is str else str.__str__(name)
 
 
 class NotTakenError(TypeError):
