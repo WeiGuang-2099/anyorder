@@ -21,6 +21,13 @@ take calls itself once for each level, so a value near the bound needs
 about a hundred calls of Python's stack, and twice as many before Python
 3.12: taken from deep inside other calls it can end in a RecursionError.
 
+key gives a hashable that stands for a value as a trace file writes it:
+two values have one key exactly when a file writes them alike. Python
+takes True, 1 and 1.0 for equal, and an agent that is given one can go on
+otherwise than an agent that is given another, so whatever looks a value
+up, such as a search that asks whether it has stood here before, goes by
+the key and not by the value.
+
 Nothing here imports the rest of the package.
 """
 
@@ -29,7 +36,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import operator
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from typing import Any
 
 # A line of a trace file is nested at most 100 levels of lists and objects
@@ -123,6 +130,59 @@ def take(value: Any, room: int = ROOM) -> Any:
             take(value.kind, room - 2), take(value.message, room - 2))
     raise NotTakenError(
         f"a call does not carry {shown(value)}, of type {_name_of(kind)}")
+
+
+def key(value: Any, room: int = ROOM) -> Hashable:
+    """Returns a hashable that stands for a value as a trace file writes it.
+
+    Two values have equal keys exactly when a file writes them alike. So
+    True, 1 and 1.0 have three keys, 0.0 and -0.0 have two, and so have a
+    list and the tuple of its parts, where Python takes each of those for
+    equal. A dict has one key whatever the order of its own keys.
+
+    Args:
+        value: A value a call carries, or a part of one.
+        room: How many levels the value may take, as for take.
+
+    Returns:
+        The value itself for a string, an integer and None. Otherwise a
+        tuple that starts with the kind of the value and shares nothing
+        with it that can change.
+
+    Raises:
+        NotTakenError: The value or a part of it is not one a call
+            carries, or it is nested too deep.
+    """
+    kind = type(value)
+    if kind is str or kind is int or value is None:
+        return value
+    if kind is bool:
+        return ("bool", value)
+    if kind is float and math.isfinite(value):
+        # Written out in full: the two zeros are equal and are two values.
+        return ("float", value.hex())
+    if kind is list:
+        left = _left(room, 1)
+        return ("list", tuple(key(part, left) for part in value))
+    if kind is tuple:
+        left = _left(room, 2)
+        return ("tuple", tuple(key(part, left) for part in value))
+    if kind is dict and _all_strings(value):
+        left = _left(room, 1)
+        return ("dict", tuple(
+            (name, key(value[name], left)) for name in sorted(value)))
+    if kind is Raised:
+        left = _left(room, 2)
+        return ("raised", key(value.kind, left), key(value.message, left))
+    raise NotTakenError(
+        f"a call does not carry {shown(value)}, of type {_name_of(kind)}")
+
+
+def _left(room: int, levels: int) -> int:
+    """Returns the room left to the parts of a value that takes levels."""
+    if room < levels:
+        raise _too_deep()
+    return room - levels
 
 
 def _all_plain(parts: Iterable[Any]) -> bool:

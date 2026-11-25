@@ -542,3 +542,126 @@ def test_value_only_a_file_refuses_is_taken(value):
     # for Python to write as text. Both are rules of the file, and a call
     # carries the two.
     assert values.take(value) == value
+
+
+# No two of these are written alike in a trace file, though Python takes
+# many of them for equal: True, 1 and 1.0, the two zeros, a list and the
+# tuple of its parts. Some are here because they look like a key.
+_APART = [
+    None, True, False, 1, 0, -1, 2**70, 1.0, 0.0, -0.0, 0.1 + 0.2, 0.3,
+    "", "1", "None", "bool",
+    [], (), {}, [1], (1,), [True], [1.0], [[1]], [(1,)], ([1],), [1, 2],
+    [2, 1],
+    {"a": 1}, {"a": True}, {"a": 1.0}, {"a": [1]}, {"b": 1},
+    {"a": 1, "b": 1}, {"a": {"b": 1}},
+    scheduler.Raised("K", "m"), scheduler.Raised("K", "n"),
+    scheduler.Raised("m", "K"), scheduler.Raised(1, None),
+    {"kind": "K", "message": "m"}, ("raised", "K", "m"), ("K", "m"),
+    ["K", "m"],
+    ("bool", True), ["bool", True], ("float", (1.0).hex()), ("list", ()),
+    ["list", []], ("tuple", ()), ("dict", ()), [["a", 1]], (("a", 1),),
+]
+
+
+def test_key_is_another_for_every_value_a_file_writes_otherwise():
+    keys = [values.key(value) for value in _APART]
+    assert len(set(keys)) == len(_APART)
+    # And each is told from every other as Python compares, not only by
+    # its hash.
+    for index, key in enumerate(keys):
+        assert keys.count(key) == 1, _APART[index]
+
+
+@pytest.mark.parametrize(
+    "one,other",
+    [
+        ([1, [2, (3,)]], [1, [2, (3,)]]),
+        ({"a": 1, "b": [2]}, {"b": [2], "a": 1}),
+        ({"a": {"x": 1, "y": 2}}, {"a": {"y": 2, "x": 1}}),
+        (scheduler.Raised("K", "m"), scheduler.Raised("K", "m")),
+        (0.1 + 0.2, 0.30000000000000004),
+        (10**30, 10**30),
+        ("caf" + chr(233), "caf" + chr(233)),
+    ],
+    ids=repr)
+def test_key_is_the_same_for_values_that_a_file_writes_alike(one, other):
+    assert values.key(one) == values.key(other)
+    assert hash(values.key(one)) == hash(values.key(other))
+
+
+@pytest.mark.parametrize("value", _APART, ids=repr)
+def test_key_can_be_hashed_and_holds_no_part_of_its_value(value):
+    key = values.key(value)
+    assert {key: 1}[values.key(values.take(value))] == 1
+    # Not the value's own lists: what is done to the value afterwards
+    # does not change the key that was made of it.
+    if type(value) is list:
+        value.append("late")
+        assert key != values.key(value)
+        value.pop()
+        assert key == values.key(value)
+
+
+def test_key_of_a_value_that_cannot_change_is_small():
+    # A string, an integer and None stand for themselves.
+    for value in ("a", 7, None):
+        assert values.key(value) is value
+
+
+@pytest.mark.parametrize("value,kind", _NOT_CARRIED)
+def test_value_no_call_carries_has_no_key(value, kind):
+    with pytest.raises(values.NotTakenError) as caught:
+        values.key(value)
+    assert str(caught.value).endswith(f", of type {kind}")
+    assert str(caught.value).startswith("a call does not carry ")
+
+
+@pytest.mark.parametrize(
+    "wrap,most",
+    [
+        (_listed, 99),
+        (lambda value: {"k": value}, 99),
+        (lambda value: (value,), 49),
+        (lambda value: scheduler.Raised("K", value), 49),
+        (lambda value: scheduler.Raised(value, "m"), 49),
+    ],
+    ids=["list", "dict", "tuple", "error", "kind"])
+def test_key_is_made_as_deep_as_a_value_is_taken_and_no_deeper(wrap, most):
+    fits = _nested(wrap, most)
+    assert values.key(fits) == values.key(values.take(fits))
+    with pytest.raises(
+            values.NotTakenError,
+            match="^a call does not carry a value nested so deep"):
+        values.key(_nested(wrap, most + 1))
+
+
+@pytest.mark.parametrize(
+    "empty,most", [([], 98), ({}, 98), ((), 97)],
+    ids=["list", "dict", "tuple"])
+def test_key_of_an_empty_value_at_the_bottom_takes_its_levels(empty, most):
+    values.key(_nested(_listed, most, empty))
+    with pytest.raises(values.NotTakenError, match="nested so deep"):
+        values.key(_nested(_listed, most + 1, empty))
+
+
+def test_value_that_holds_itself_has_no_key():
+    looped: list[Any] = []
+    looped.append(looped)
+    with pytest.raises(values.NotTakenError, match="nested so deep"):
+        values.key(looped)
+
+
+def test_key_is_written_as_the_kind_of_its_value_and_the_keys_of_its_parts():
+    # Written out: a table of draws seeds each draw with the keys of what
+    # its agent has seen, so another way of writing a key would be other
+    # draws under every seed.
+    assert values.key(True) == ("bool", True)
+    assert values.key(1.5) == ("float", "0x1.8000000000000p+0")
+    assert values.key(-0.0) == ("float", "-0x0.0p+0")
+    assert values.key([1, "a", None]) == ("list", (1, "a", None))
+    assert values.key((1, [2])) == ("tuple", (1, ("list", (2,))))
+    assert values.key({"b": False, "a": (2,)}) == (
+        "dict", (("a", ("tuple", (2,))), ("b", ("bool", False))))
+    assert values.key(scheduler.Raised("K", "m")) == ("raised", "K", "m")
+    assert values.key(scheduler.Raised("K", [1.0])) == (
+        "raised", "K", ("list", (("float", "0x1.0000000000000p+0"),)))
