@@ -2089,9 +2089,20 @@ def test_policy_is_shown_a_violation_of_the_fresh_world():
 
 def test_policy_is_not_shown_what_is_asked_only_at_the_end():
     policy = _Looking()
-    result = scheduler.run(_lamp(1, _DARK_AT_END), policy)
+    # Lit after the first switch, dark after the second and lit at the
+    # end. What must hold only at the end is asked only there, so the
+    # lamp that was lit at the second choice is no violation to show.
+    result = scheduler.run(_lamp(3, _DARK_AT_END), policy)
+    assert result.violation == scheduler.Violation(
+        "dark-at-end", "the lamp is lit", 3)
+    assert [choice["violation"] for choice in policy.choices] == [
+        None, None, None]
+    # Nor is a fresh world that would fail it.
+    policy = _Looking()
+    result = scheduler.run(_lamp(2, _DARK_AT_END, lit=True), policy)
     assert result.violation is not None
-    assert [choice["violation"] for choice in policy.choices] == [None]
+    assert [choice["violation"] for choice in policy.choices] == [
+        None, None]
 
 
 def test_sampler_is_shown_the_run_as_it_stands_at_the_draw():
