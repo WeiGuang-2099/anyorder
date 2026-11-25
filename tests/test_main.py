@@ -1,5 +1,9 @@
-"""Checks that the demo prints what the README says it prints."""
+"""Checks that the demo prints what the README says it prints.
 
+The last test runs the agent that the README writes out.
+"""
+
+import itertools
 import pathlib
 import subprocess
 import sys
@@ -462,3 +466,28 @@ def test_demo_refuses_an_argument_it_does_not_know(capsys):
     status, printed = _exit_status(["--seeds", "5"], capsys)
     assert status == 2
     assert printed.out == ""
+
+
+def test_agent_the_readme_writes_out_draws_and_buys_one_time_in_four():
+    readme = _README.read_text(encoding="utf-8").splitlines()
+    start = readme.index("    async def buyer(ctx):")
+    block = itertools.takewhile(
+        lambda line: line.startswith("    "), readme[start:])
+    written: dict = {}
+    exec("\n".join(line[4:] for line in block), written)
+    scenario = scheduler.Scenario(
+        name="readme",
+        make_world=lambda: oversell.Inventory(1),
+        agents={"buyer-1": written["buyer"]},
+        invariants=(),
+    )
+    bought = 0
+    for seed in range(400):
+        run = scheduler.run(
+            scenario, scheduler.RandomPolicy(seed),
+            scheduler.SeededSampler(seed))
+        assert len(run.draws) == 1
+        bought += len(run.steps)
+    # A quarter of 400 is 100, with a standard deviation of 9. The count
+    # of these seeds is written out, and happens to be the quarter.
+    assert bought == 100

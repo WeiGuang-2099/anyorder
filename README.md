@@ -17,10 +17,13 @@ Early. What works today:
 * Calls by value. Every argument and every result is taken at its call, so
   a trace holds each value as it was then, and an agent and its world
   share nothing but what a call carries.
-* Seeded random search over schedules.
+* Draws. An agent can ask for a sample, such as a choice between outcomes
+  with written weights, and the run's sampler gives it at once. A run is
+  fixed by its schedule and its draws together.
+* Seeded random search over schedules, with fresh draws for each seed.
 * Exhaustive search over every schedule of a small scenario.
-* Replay of a recorded schedule. A run that leaves its schedule is refused,
-  not tolerated.
+* Replay of a recorded schedule and its draws. A run that leaves either is
+  refused, not tolerated.
 * Shrinking of a failing schedule toward fewer context switches, then fewer
   agents.
 * Trace files. A run is written as JSON lines, read back and replayed. A
@@ -138,28 +141,41 @@ entries do, so both writes go through.
   suspends the agent and hands the scheduler one pending tool call.
 * The scheduler holds one pending call per unfinished agent and asks a
   policy which runs next. The list of chosen agent names is the schedule.
+  Agents are started in name order, whatever order a scenario lists them
+  in.
 * A call is by value. An argument is taken when the agent awaits the call
   and a result when the tool returns. The tool, the agent and the trace
   each get a copy of their own of every list and dict in it, at any depth,
   and share what cannot change, such as a string or a tuple of numbers.
+* An agent draws through `AgentContext.draw`. It asks for one sample, and
+  the sampler that the run was given answers at once. A draw is not a
+  scheduling point: no other agent acts between a draw and what its agent
+  does next. What was asked for and what was given are taken by value, as
+  the arguments and the result of a call are, and the run keeps every
+  draw with the number of steps that ran before it.
 * `explore.explore` runs one random schedule per seed until an invariant
-  fails. It replays the failing schedule and checks that the trace is the
-  same before returning it.
+  fails. Agents that draw are given fresh draws for each seed, from a
+  seeded sampler whose stream is apart from the one that picks the
+  schedule. It replays the failing schedule with its draws and checks that
+  the trace is the same before returning it.
 * `explore.exhaust` runs every complete schedule of a scenario, depth
   first, and replays each run before yielding it.
-* `explore.replay` runs a scenario under a given schedule.
+* `explore.replay` runs a scenario under a given schedule and gives the
+  draws it is given back to the agents that made them, in order.
 * `shrink.shrink` looks for a smaller failure of the same invariant: fewer
   context switches before the invariant breaks, then fewer agents among
   the steps up to there. It moves steps of the failing schedule, runs each
   candidate, and replays the one it keeps before going on from it.
 * `tracefile.dumps` gives a run as the text of a trace file: JSON lines,
   one that names the format, its version and the scenario, one for each
-  step with its agent, its call and the result, and one with the
-  violation. It reads the text back and replays it before it returns it.
-  `tracefile.loads` reads such a text, of the version that is written or
-  of the one before it, and `tracefile.replay` runs the schedule it holds
-  and refuses the file unless every step and the violation come out as
-  the file holds them.
+  step with its agent, its call and the result, one for each draw, where
+  it was made, with its agent, what it asked for and what it was given,
+  and one with the violation. It reads the text back and replays it
+  before it returns it. `tracefile.loads` reads such a text, of the
+  version that is written or of the one before it, which has no draws.
+  `tracefile.replay` runs the schedule it holds, gives each draw back to
+  its agent and refuses the file unless every step, every draw and the
+  violation come out as the file holds them.
 * `oracle.serial_outcomes` runs every serial order of a scenario's agents,
   each agent making all its calls before the next makes one, and keeps the
   state each order leaves its world in, as a snapshot function gives it.
@@ -168,8 +184,8 @@ entries do, so both writes go through.
   state. With none the run failed, and it is replayed once more before
   that is reported: both replays must end in the same state.
 
-Seeds find schedules. The schedule is what a failure is stored and reported
-as.
+Seeds find schedules and draws. The schedule, with the draws, is what a
+failure is stored and reported as.
 
 ## Writing a scenario
 
@@ -200,6 +216,20 @@ integers, finite floats, strings, lists, tuples, dicts with string keys
 and tool errors. It may return a list of its own, since the caller gets a
 copy. A tuple of strings and numbers is cheaper: nothing in it can change,
 so none of it is copied.
+
+An agent that acts by chance draws, and does not use randomness of its
+own, which no replay could give back:
+
+    async def buyer(ctx):
+        if await ctx.draw((("buy", 1), ("leave", 3))) == "buy":
+            await ctx.call("reserve", buyer=ctx.name)
+
+What it draws from is a written distribution: pairs of an outcome and a
+weight, each weight a positive integer, so that every chance is an exact
+fraction. This buyer of the oversell's world buys one time in four.
+`explore.explore` draws from a written distribution with a seeded sampler,
+and `scheduler.run` takes any sampler, which may read what an agent asks
+for in another way.
 
 An invariant's check is asked about the world alone. One that kept a
 memory of its own would carry it from one run into the next, and a replay
@@ -232,7 +262,24 @@ counts as ending the same.
   the run after it ran. Neither error is handed to the agent. A search, a
   shrink, the oracle or the replay of a file that meets such a call under
   a schedule ends with that error, which names no schedule, and a failure
-  that was found before it is not reported.
+  that was found before it is not reported. A draw is held to the same in
+  what it asks for and in what it is given, and an error of a sampler
+  ends the run as well: unlike a tool's, it is never handed to the agent.
+* The seeded sampler makes its draws from one stream, in the order they
+  are asked for. So what an agent draws depends on the draws made before
+  it, by any agent, and the same seed can give an agent another sample
+  under another schedule where it has seen and done the same. Exhaustive
+  search, shrinking and the serial-equivalence oracle need draws that
+  stay with what an agent has seen, and that is not built. Until it is,
+  none of the three runs a scenario whose agents draw: `shrink.shrink`
+  refuses a run that made draws before it runs anything, and the other
+  two end with an error at the first draw.
+* A replay gives a draw back as it was recorded and does not ask whether a
+  sampler could have given it. A trace file that holds a draw of 1 where
+  the outcomes are True and False replays, if the run that comes of the 1
+  is the run the file holds.
+* An agent that goes on drawing and never calls a tool never lets its run
+  end. Nothing bounds a run.
 * A call is by value. A tool that fills a list it was given hands nothing
   back through it, and a list that is used as a handle is another object
   on the other side. The copies are made at every call: a large list or
@@ -302,7 +349,7 @@ counts as ending the same.
   whether a scenario is deterministic and does not prove it.
 * A trace file holds the values a call carries, but for two: a string that
   holds a surrogate, and an integer too long for Python to write as text.
-  A call carries both, and a run with either is not written.
+  A call and a draw carry both, and a run with either is not written.
 * A trace file of version 1 was written when a trace kept its values by
   reference, so that a list changed after its call was written with its
   final content. Such a file is still read. It replays where its run did
