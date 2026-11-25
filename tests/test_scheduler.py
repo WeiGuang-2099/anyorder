@@ -1170,3 +1170,450 @@ def test_tool_error_is_plain_text_whatever_the_error_says_it_is():
     assert error == scheduler.Raised("Boom", "boom")
     assert type(error.kind) is str and type(error.message) is str
     assert len(result.steps) == 2
+
+
+class _Listed:
+    """A sampler that gives the values it was built with, in order.
+
+    Attributes:
+        asked: The agent and the request of each draw, as it was given
+            them.
+    """
+
+    def __init__(self, *given: Any) -> None:
+        self._given = iter(given)
+        self.asked: list[tuple[str, Any]] = []
+
+    def sample(self, agent: str, request: Any) -> Any:
+        self.asked.append((agent, request))
+        return next(self._given)
+
+
+class _Watching:
+    """A policy that takes the first waiting agent and keeps what it saw."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, ...]] = []
+
+    def choose(self, waiting: Any) -> str:
+        self.seen.append(tuple(waiting))
+        return waiting[0]
+
+
+async def _flipper(ctx: scheduler.AgentContext) -> None:
+    """Records, draws, and records what it drew."""
+    await ctx.call("record", entry=f"{ctx.name}:1")
+    side = await ctx.draw("coin")
+    await ctx.call("record", entry=f"{ctx.name}:{side}")
+
+
+def test_agent_receives_what_the_sampler_gives():
+    sampler = _Listed("heads")
+    result = scheduler.run(
+        _scenario(a=_flipper), scheduler.ReplayPolicy(["a", "a"]), sampler)
+    assert _entries(result) == ["a:1", "a:heads"]
+    assert sampler.asked == [("a", "coin")]
+    assert result.draws == (scheduler.Drawn("a", "coin", "heads", 1),)
+
+
+def test_draw_built_by_hand_is_a_draw():
+    async def flipper(ctx: scheduler.AgentContext) -> None:
+        side = await scheduler.Draw("coin")
+        await ctx.call("record", entry=side)
+
+    result = scheduler.run(
+        _scenario(a=flipper), scheduler.ReplayPolicy(["a"]), _Listed("tails"))
+    assert _entries(result) == ["tails"]
+    assert result.draws == (scheduler.Drawn("a", "coin", "tails", 0),)
+
+
+@pytest.mark.parametrize(
+    "schedule", [["a", "b", "a", "b"], ["a", "b", "b", "a"]],
+    ids=["a-goes-on-first", "b-goes-on-first"])
+def test_draw_is_made_at_once_and_is_no_scheduling_point(schedule):
+    result = scheduler.run(
+        _scenario(a=_flipper, b=_flipper), scheduler.ReplayPolicy(schedule),
+        _Listed("x", "y"))
+    # Each agent draws as soon as its first call returns, and not when it
+    # is next chosen: a's draw is made after step 1 and b's after step 2,
+    # whichever of them goes on first.
+    assert result.draws == (
+        scheduler.Drawn("a", "coin", "x", 1),
+        scheduler.Drawn("b", "coin", "y", 2),
+    )
+    assert result.schedule == tuple(schedule)
+
+
+def test_policy_is_not_asked_at_a_draw():
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("first")
+        await ctx.call("record", entry=ctx.name)
+        await ctx.draw("second")
+        await ctx.draw("third")
+
+    policy = _Watching()
+    result = scheduler.run(
+        _scenario(a=drawer, b=_writer), policy, _Listed(1, 2, 3))
+    # Three calls, so three choices. Before the first of them a has drawn
+    # and waits to call. After its call it draws twice and finishes with no
+    # other agent between.
+    assert policy.seen == [("a", "b"), ("b",), ("b",)]
+    assert result.draws == (
+        scheduler.Drawn("a", "first", 1, 0),
+        scheduler.Drawn("a", "second", 2, 1),
+        scheduler.Drawn("a", "third", 3, 1),
+    )
+
+
+def test_draws_before_the_first_call_are_made_in_name_order():
+    async def opener(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw(ctx.name)
+        await ctx.call("record", entry=ctx.name)
+
+    result = scheduler.run(
+        _scenario(c=opener, a=opener, b=opener), scheduler.RandomPolicy(0),
+        _Listed(1, 2, 3))
+    # Whatever order the scenario lists them in: a run is told from another
+    # by its draws too, so the listing must not change them.
+    assert result.draws == (
+        scheduler.Drawn("a", "a", 1, 0),
+        scheduler.Drawn("b", "b", 2, 0),
+        scheduler.Drawn("c", "c", 3, 0),
+    )
+
+
+def test_agent_that_only_draws_makes_no_step():
+    async def dreamer(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("coin")
+
+    result = scheduler.run(
+        _scenario(a=dreamer), scheduler.ReplayPolicy([]), _Listed("heads"))
+    assert result == scheduler.RunResult(
+        (), None, (scheduler.Drawn("a", "coin", "heads", 0),))
+
+
+def test_run_that_makes_no_draw_holds_none():
+    result = scheduler.run(
+        _scenario(), scheduler.RandomPolicy(0), _Listed("unused"))
+    assert result.draws == ()
+    # And a run built by hand need not say so.
+    assert scheduler.RunResult((), None) == scheduler.RunResult((), None, ())
+
+
+def test_runs_that_differ_in_a_draw_are_not_equal():
+    async def deaf(ctx: scheduler.AgentContext) -> None:
+        # What it draws changes nothing it does.
+        await ctx.draw("coin")
+        await ctx.call("record", entry=ctx.name)
+
+    def run(*given: Any) -> scheduler.RunResult:
+        return scheduler.run(
+            _scenario(a=deaf), scheduler.ReplayPolicy(["a"]), _Listed(*given))
+
+    assert run("heads").steps == run("tails").steps
+    assert run("heads") != run("tails")
+    assert run("heads") == run("heads")
+
+
+def test_draw_in_a_run_with_no_sampler_ends_the_run():
+    handled = []
+
+    async def flipper(ctx: scheduler.AgentContext) -> None:
+        try:
+            await ctx.draw("coin")
+        except Exception:
+            # The refusal is not the agent's to handle.
+            handled.append(ctx.name)
+
+    coroutines = {}
+    scenario = _scenario(
+        a=_kept(_writer, coroutines), z=_kept(flipper, coroutines))
+    with pytest.raises(scheduler.UnsupportedAwaitError) as caught:
+        scheduler.run(scenario, scheduler.RandomPolicy(0))
+    assert str(caught.value) == (
+        "agent 'z' awaited a draw, and the run has no sampler")
+    assert not handled
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "z": inspect.CORO_CLOSED}
+
+
+def test_run_with_no_sampler_runs_agents_that_do_not_draw():
+    async def shy(ctx: scheduler.AgentContext) -> None:
+        size = await ctx.call("size")
+        if size > 9:
+            await ctx.draw("coin")
+
+    # Refused where a draw is awaited, and not for what an agent could do.
+    result = scheduler.run(_scenario(a=shy), scheduler.RandomPolicy(0))
+    assert len(result.steps) == 1 and result.draws == ()
+
+
+def test_unsupported_await_names_what_an_agent_may_await():
+    async def sleeper(ctx: scheduler.AgentContext) -> None:
+        await asyncio.sleep(0)
+
+    with pytest.raises(scheduler.UnsupportedAwaitError) as caught:
+        scheduler.run(
+            _scenario(a=sleeper), scheduler.RandomPolicy(0), _Listed())
+    assert str(caught.value) == (
+        "agent 'a' awaited NoneType; an agent may only await "
+        "AgentContext.call and AgentContext.draw")
+
+
+class _Meddling:
+    """A sampler that writes on what it is given and keeps what it gives."""
+
+    def __init__(self) -> None:
+        self.given: list[Any] = []
+        self.gave: list[list[str]] = []
+
+    def sample(self, agent: str, request: Any) -> list[str]:
+        self.given.append(request)
+        request.append("meddled")
+        self.gave.append(["drawn"])
+        return self.gave[-1]
+
+
+def test_request_is_taken_when_the_agent_awaits_the_draw():
+    mine = ["a", ["b"]]
+
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw(mine)
+        # No call: the agent changes its own list after the draw.
+        mine[1].append("late")
+        await ctx.call("record", entry=ctx.name)
+
+    sampler = _Meddling()
+    result = scheduler.run(
+        _scenario(a=asker), scheduler.ReplayPolicy(["a"]), sampler)
+    # The trace shows the request as the agent gave it. The sampler wrote
+    # on a copy of its own, and the agent's list is the agent's alone.
+    assert result.draws[0].request == ["a", ["b"]]
+    assert sampler.given == [["a", ["b"], "meddled"]]
+    assert mine == ["a", ["b", "late"]]
+    assert sampler.given[0][1] is not mine[1]
+    assert sampler.given[0][1] is not result.draws[0].request[1]
+
+
+def test_drawn_value_is_shared_by_nobody():
+    received = []
+
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        received.append(await ctx.draw([]))
+        received[0].append("scribble")
+        received.append(await ctx.draw([]))
+
+    sampler = _Meddling()
+    result = scheduler.run(
+        _scenario(a=asker), scheduler.ReplayPolicy([]), sampler)
+    # The sampler keeps the list it gave and writes on it afterwards.
+    for gave in sampler.gave:
+        gave.append("sampler's")
+    assert [draw.value for draw in result.draws] == [["drawn"], ["drawn"]]
+    assert received == [["drawn", "scribble"], ["drawn"]]
+    assert sampler.gave == [["drawn", "sampler's"]] * 2
+
+
+def test_draw_that_cannot_change_is_not_copied():
+    request = (("heads", 1), ("tails", 1))
+    value = ("heads", 7)
+    received = []
+
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        received.append(await ctx.draw(request))
+
+    sampler = _Listed(value)
+    result = scheduler.run(
+        _scenario(a=asker), scheduler.ReplayPolicy([]), sampler)
+    assert sampler.asked[0][1] is request
+    assert result.draws[0].request is request
+    assert result.draws[0].value is value
+    assert received[0] is value
+
+
+def test_request_no_call_carries_ends_the_run_before_the_sampler_is_asked():
+    handled = []
+
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        try:
+            await ctx.draw({1, 2})
+        except Exception:
+            # The refusal is not the agent's to handle.
+            handled.append(ctx.name)
+
+    sampler = _Listed("unused")
+    coroutines = {}
+    scenario = _scenario(
+        a=_kept(_writer, coroutines), z=_kept(asker, coroutines))
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        scheduler.run(scenario, scheduler.RandomPolicy(0), sampler)
+    assert str(caught.value) == (
+        "agent 'z' cannot draw: a call does not carry {1, 2}, of type set")
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert not handled and not sampler.asked
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "z": inspect.CORO_CLOSED}
+
+
+@pytest.mark.parametrize(
+    "given,shown",
+    [({1, 2}, "{1, 2}, of type set"), (float("nan"), "nan, of type float")],
+    ids=["set", "nan"])
+def test_drawn_value_no_call_carries_ends_the_run(given, shown):
+    handled = []
+
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        try:
+            await ctx.draw("coin")
+        except Exception:
+            handled.append(ctx.name)
+
+    sampler = _Listed(given)
+    coroutines = {}
+    scenario = _scenario(
+        a=_kept(_writer, coroutines), z=_kept(asker, coroutines))
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        scheduler.run(scenario, scheduler.RandomPolicy(0), sampler)
+    assert str(caught.value) == (
+        "a draw was made for agent 'z' and its value is refused: a call "
+        f"does not carry {shown}")
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    # The sampler was asked all the same: it may have spent something.
+    assert sampler.asked == [("z", "coin")]
+    assert not handled
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "z": inspect.CORO_CLOSED}
+
+
+def _nested(levels: int) -> Any:
+    deep: Any = 0
+    for _ in range(levels):
+        deep = [deep]
+    return deep
+
+
+def test_draw_is_nested_as_deep_as_a_result_and_no_deeper():
+    def run(request: Any, value: Any) -> scheduler.RunResult:
+        async def asker(ctx: scheduler.AgentContext) -> None:
+            await ctx.draw(request)
+
+        return scheduler.run(
+            _scenario(a=asker), scheduler.ReplayPolicy([]), _Listed(value))
+
+    # Neither is inside a dict of arguments, so each has the 99 levels
+    # that a result has.
+    assert run(_nested(99), _nested(99)).draws[0] == scheduler.Drawn(
+        "a", _nested(99), _nested(99), 0)
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^agent 'a' cannot draw: a call does not carry a value "
+                  "nested so deep"):
+        run(_nested(100), 0)
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^a draw was made for agent 'a' and its value is refused: "
+                  "a call does not carry a value nested so deep"):
+        run(0, _nested(100))
+
+
+class _Failing:
+    """A sampler that raises what it was built with."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def sample(self, agent: str, request: Any) -> Any:
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        scheduler.ReplayDivergenceError("from a sampler"),
+        ValueError("from a sampler"),
+        KeyboardInterrupt(),
+    ],
+    ids=["divergence", "error", "interrupt"])
+def test_error_of_a_sampler_ends_the_run_and_closes_every_agent(error):
+    handled = []
+
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("record", entry=ctx.name)
+        try:
+            await ctx.draw("coin")
+        except Exception:
+            # No error of a sampler is the agent's to handle, where a
+            # tool's is: a draw that failed gave the agent nothing.
+            handled.append(ctx.name)
+
+    coroutines = {}
+    scenario = _scenario(
+        a=_kept(_writer, coroutines), z=_kept(asker, coroutines))
+    with pytest.raises(type(error)) as caught:
+        scheduler.run(
+            scenario, scheduler.ReplayPolicy(["z", "a"]), _Failing(error))
+    assert caught.value is error
+    assert not handled
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "z": inspect.CORO_CLOSED}
+
+
+class _Sealed(scheduler.Draw):
+    """A draw whose request raises when it is read."""
+
+    @property
+    def request(self) -> Any:
+        raise LookupError("no request today")
+
+
+def test_error_while_a_draw_is_read_closes_every_agent():
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        # Made without its field: a frozen draw takes no request it
+        # cannot set.
+        await object.__new__(_Sealed)
+
+    coroutines = {}
+    scenario = _scenario(
+        a=_kept(_writer, coroutines), z=_kept(asker, coroutines))
+    with pytest.raises(LookupError):
+        scheduler.run(scenario, scheduler.RandomPolicy(0), _Listed("unused"))
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "z": inspect.CORO_CLOSED}
+
+
+def test_invariants_are_asked_before_an_agent_draws():
+    seen = []
+
+    class Noting(_Listed):
+        def sample(self, agent: str, request: Any) -> Any:
+            seen.append("drew")
+            return super().sample(agent, request)
+
+    async def switcher(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("switch")
+        await ctx.draw("coin")
+
+    def asked(lamp: _Lamp) -> str | None:
+        seen.append(f"asked at {lamp.switches}")
+        return None
+
+    scenario = dataclasses.replace(
+        _lamp(0), agents={"a": switcher},
+        invariants=(scheduler.Invariant("heard", asked, every_step=True),))
+    result = scheduler.run(scenario, scheduler.RandomPolicy(0), Noting("x"))
+    # The draw comes when the agent goes on, which is after its step was
+    # judged: step 1 is the step the draw followed.
+    assert seen == ["asked at 0", "asked at 1", "drew"]
+    assert result.draws == (scheduler.Drawn("a", "coin", "x", 1),)

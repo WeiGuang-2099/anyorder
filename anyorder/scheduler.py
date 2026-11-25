@@ -14,12 +14,20 @@ So the trace holds each value as it was at its call, and an agent and its
 world share nothing but what a call carries. A value that no call carries
 ends the run.
 
+An agent can also draw, through AgentContext.draw: it asks for one sample,
+and the run's sampler gives it. A draw is no scheduling point. It is made
+as soon as the agent awaits it, and no other agent acts before this one
+goes on. What was asked and what was given are values a call carries,
+taken as a call's are, and the run keeps each draw beside its steps: a run
+is fixed by its schedule and its draws together.
+
 Nothing here reads the clock, starts a thread or uses an event loop.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import functools
 import operator
 import random
 from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
@@ -41,11 +49,19 @@ class UnknownToolError(SchedulerError):
 
 
 class UnsupportedAwaitError(SchedulerError):
-    """An agent awaited something other than a tool call."""
+    """An agent awaited what its run does not give.
+
+    That is anything but a tool call and a draw, and a draw in a run that
+    has no sampler.
+    """
 
 
 class UnsupportedValueError(SchedulerError):
-    """An argument or a result is not a value a call carries."""
+    """A value is not one a call carries.
+
+    It is an argument or a result of a call, or what a draw asked for or
+    was given.
+    """
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,8 +81,25 @@ class Effect:
         return result
 
 
+@dataclasses.dataclass(frozen=True)
+class Draw:
+    """One sample an agent is waiting for.
+
+    Attributes:
+        request: What to draw from. The scheduler does not read it: it is
+            whatever the run's sampler takes, such as a distribution that
+            a scripted agent writes out.
+    """
+
+    request: Any
+
+    def __await__(self) -> Generator[Draw, Any, Any]:
+        value = yield self
+        return value
+
+
 class AgentContext:
-    """An agent's handle on its run: its name and its world's tools."""
+    """An agent's handle on its run: its name, its world's tools and draws."""
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -85,6 +118,22 @@ class AgentContext:
             list or a dict in it is the agent's own copy.
         """
         return await Effect(tool, args)
+
+    async def draw(self, request: Any) -> Any:
+        """Draws one sample from the run's sampler, at once.
+
+        No other agent acts between this await and what the agent does
+        with the sample: only a tool call lets the scheduler choose.
+
+        Args:
+            request: What to draw from, as the run's sampler reads it. It
+                is taken at this await, as an argument of a call is.
+
+        Returns:
+            What the sampler gave. A list or a dict in it is the agent's
+            own copy.
+        """
+        return await Draw(request)
 
 
 Agent = Callable[[AgentContext], Coroutine[Any, Any, None]]
@@ -153,6 +202,27 @@ class Step:
 
 
 @dataclasses.dataclass(frozen=True)
+class Drawn:
+    """One draw that was made.
+
+    Attributes:
+        agent: The agent that drew.
+        request: What it asked to draw from, as it was when the agent
+            awaited the draw.
+        value: What the sampler gave, as it was when it gave it.
+        step: How many steps had run when the draw was made: 0 for a draw
+            that an agent made before the first call of the run. After a
+            step only the agent that took it goes on, so a draw made then
+            is that agent's.
+    """
+
+    agent: str
+    request: Any
+    value: Any
+    step: int
+
+
+@dataclasses.dataclass(frozen=True)
 class Violation:
     """An invariant that did not hold, and where a run first saw that.
 
@@ -177,10 +247,14 @@ class RunResult:
         steps: Every tool call, in the order it ran. A run goes on to its
             end after a violation.
         violation: The first violation the run saw, or None.
+        draws: Every draw, in the order it was made. The schedule and the
+            draws together fix the run: neither does alone once an agent
+            draws.
     """
 
     steps: tuple[Step, ...]
     violation: Violation | None
+    draws: tuple[Drawn, ...] = ()
 
     @property
     def schedule(self) -> tuple[str, ...]:
@@ -226,6 +300,22 @@ class ReplayPolicy:
         return name
 
 
+class Sampler(Protocol):
+    """Gives the samples that agents draw."""
+
+    def sample(self, agent: str, request: Any) -> Any:
+        """Returns one sample.
+
+        Args:
+            agent: The agent that draws.
+            request: What it asked to draw from. A list or a dict in it is
+                a copy for the sampler.
+
+        Returns:
+            The sample, a value a call carries.
+        """
+
+
 # By agent: its coroutine, the tool and the arguments of the call it waits
 # to make, and whether none of the arguments can change. The arguments are
 # the scheduler's own since the await.
@@ -233,39 +323,48 @@ _Pending = dict[
     str, tuple[Coroutine[Any, Any, None], str, dict[str, Any], bool]]
 
 
-def run(scenario: Scenario, policy: Policy) -> RunResult:
+def run(
+    scenario: Scenario, policy: Policy, sampler: Sampler | None = None
+) -> RunResult:
     """Runs a scenario until every agent has finished.
 
     Args:
         scenario: What to run.
         policy: Chooses the agent for each step, including steps where only
             one agent is waiting, so a schedule has one entry per step.
+        sampler: Gives the agents their draws. A scenario whose agents do
+            not draw needs none.
 
     Returns:
-        The trace and the first violation, if any. Invariants that must
-        hold after every step are asked on the fresh world and after each
-        step, the others once every agent has finished. Nothing is asked
-        after the first violation.
+        The trace, the draws and the first violation, if any. Invariants
+        that must hold after every step are asked on the fresh world and
+        after each step, the others once every agent has finished. Nothing
+        is asked after the first violation.
 
     Raises:
         UnknownToolError: An agent called a tool the world lacks.
         UnsupportedAwaitError: An agent awaited something other than
-            AgentContext.call.
+            AgentContext.call and AgentContext.draw, or it drew and the
+            run has no sampler.
         UnsupportedValueError: An argument or a result is not a value a
             call carries. An argument is refused when its agent awaits
             the call, before the tool runs and before the policy is
-            asked again. A result is refused once its tool has run.
+            asked again. A result is refused once its tool has run. A
+            draw is refused alike: what it asks for before the sampler
+            is asked, and what the sampler gave once it gave it.
     """
     world = scenario.make_world()
     pending: _Pending = {}
     steps: list[Step] = []
+    draws: list[Drawn] = []
+    draw = functools.partial(_drawn, sampler, draws, steps)
     try:
         # In name order, as a policy is shown the waiting agents: what an
         # agent does before its first call must not depend on the order a
         # scenario happens to list its agents in.
         for name in sorted(scenario.agents):
             agent = scenario.agents[name]
-            _advance(pending, name, agent(AgentContext(name)), None)
+            _advance(pending, name, agent(AgentContext(name)), None, draw)
         violation = _first_violation(scenario, world, 0, every_step=True)
         while pending:
             name = policy.choose(sorted(pending))
@@ -286,7 +385,7 @@ def run(scenario: Scenario, policy: Policy) -> RunResult:
             # Not sooner: an error raised above leaves the agent here to be
             # closed.
             del pending[name]
-            _advance(pending, name, coroutine, handed)
+            _advance(pending, name, coroutine, handed, draw)
     finally:
         # An error leaves agents suspended mid-call.
         for coroutine, *_ in pending.values():
@@ -294,7 +393,7 @@ def run(scenario: Scenario, policy: Policy) -> RunResult:
     if violation is None:
         violation = _first_violation(
             scenario, world, len(steps), every_step=False)
-    return RunResult(tuple(steps), violation)
+    return RunResult(tuple(steps), violation, tuple(draws))
 
 
 def _advance(
@@ -302,26 +401,95 @@ def _advance(
     name: str,
     coroutine: Coroutine[Any, Any, None],
     value: Any,
+    draw: Callable[[str, Any], Any],
 ) -> None:
-    """Resumes an agent until its next tool call or its end."""
+    """Resumes an agent until its next tool call or its end.
+
+    A draw on the way is made at once, and the agent goes on with what it
+    drew: no policy is asked between.
+
+    Args:
+        pending: Where the agent's next call is put.
+        name: The agent.
+        coroutine: The agent as it runs.
+        value: What its last await gives it.
+        draw: Makes a draw for an agent, given what it asked to draw from.
+    """
+    while True:
+        try:
+            awaited = coroutine.send(value)
+        except StopIteration:
+            return
+        if isinstance(awaited, Effect):
+            break
+        if not isinstance(awaited, Draw):
+            _close(coroutine)
+            raise UnsupportedAwaitError(
+                f"agent {name!r} awaited {type(awaited).__name__}; an agent "
+                "may only await AgentContext.call and AgentContext.draw")
+        try:
+            value = draw(name, awaited.request)
+        except BaseException:
+            # As for a call below: nothing else closes this agent.
+            _close(coroutine)
+            raise
     try:
-        effect = coroutine.send(value)
-    except StopIteration:
-        return
-    if not isinstance(effect, Effect):
-        _close(coroutine)
-        raise UnsupportedAwaitError(
-            f"agent {name!r} awaited {type(effect).__name__}; an agent may "
-            "only await AgentContext.call")
-    try:
-        tool = effect.tool
-        args, fixed = _taken_args(name, tool, effect.args)
+        tool = awaited.tool
+        args, fixed = _taken_args(name, tool, awaited.args)
     except BaseException:
         # Whatever was raised, an interrupt too: the agent is not among
         # the pending ones that run closes.
         _close(coroutine)
         raise
     pending[name] = (coroutine, tool, args, fixed)
+
+
+def _drawn(
+    sampler: Sampler | None,
+    draws: list[Drawn],
+    steps: Sequence[Step],
+    name: str,
+    given: Any,
+) -> Any:
+    """Makes one draw for an agent and adds it to the draws of its run.
+
+    Args:
+        sampler: The run's sampler, if it has one.
+        draws: The draws of the run so far.
+        steps: The steps of the run so far.
+        name: The agent that draws.
+        given: What it asked to draw from.
+
+    Returns:
+        The agent's own copy of what the sampler gave.
+
+    Raises:
+        UnsupportedAwaitError: The run has no sampler.
+        UnsupportedValueError: What the agent asked for or what the
+            sampler gave is not a value a call carries. The sampler has
+            not been asked in the first case and has in the second.
+    """
+    if sampler is None:
+        raise UnsupportedAwaitError(
+            f"agent {name!r} awaited a draw, and the run has no sampler")
+    try:
+        request = values.take(given)
+    except values.NotTakenError as error:
+        raise UnsupportedValueError(
+            f"agent {name!r} cannot draw: {error}") from None
+    # A copy of its own for the sampler, as a tool gets one of its
+    # arguments. A value that was handed back as it is cannot change.
+    returned = sampler.sample(
+        name, given if request is given else values.take(request))
+    try:
+        value = values.take(returned)
+    except values.NotTakenError as error:
+        raise UnsupportedValueError(
+            f"a draw was made for agent {name!r} and its value is refused: "
+            f"{error}") from None
+    draws.append(Drawn(name, request, value, len(steps)))
+    # And one for the agent, which may change what it is given.
+    return returned if value is returned else values.take(value)
 
 
 def _taken_args(
