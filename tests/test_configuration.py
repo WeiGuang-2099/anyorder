@@ -543,6 +543,37 @@ def test_configuration_at_a_draw_holds_those_that_wait_beside_who_draws():
         (("a", ()), ("m", ()), ("z", (("call", "inc", _NO_ARGS, 1),))))]
 
 
+async def _adds_then_draws(ctx: scheduler.AgentContext) -> None:
+    await ctx.call("inc")
+    await ctx.draw("coin")
+
+
+def test_configuration_at_a_draw_holds_its_agents_in_name_order():
+    sampler = _Standing("heads")
+    scheduler.run(
+        _counter(ann=_adder, mid=_adds_then_draws, zed=_adder),
+        scheduler.ReplayPolicy(["mid", "ann", "zed"]), sampler)
+    # mid draws after its call while ann and zed still wait. It stands
+    # between them, where its name puts it, and not after those that wait.
+    assert sampler.drawing == ["mid"]
+    assert sampler.stood == [configuration.Configuration(
+        (1, ()),
+        (("ann", ()),
+         ("mid", (("call", "inc", _NO_ARGS, 1),)),
+         ("zed", ())))]
+
+
+def test_configuration_at_a_draw_holds_an_agent_with_the_empty_name():
+    sampler = _Standing("heads")
+    scheduler.run(
+        _counter(**{"": _adds_then_draws}), scheduler.ReplayPolicy([""]),
+        sampler)
+    # The empty string is a name like any other.
+    assert sampler.drawing == [""]
+    assert sampler.stood == [configuration.Configuration(
+        (1, ()), (("", (("call", "inc", _NO_ARGS, 1),)),))]
+
+
 def test_agent_that_goes_by_the_order_of_a_dict_stands_at_another_place():
     class Desk:
         """Hands out two entries, in the order it was built with."""
