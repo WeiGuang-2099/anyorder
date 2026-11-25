@@ -21,9 +21,15 @@ Early. What works today:
   with written weights, and the run's sampler gives it at once. A run is
   fixed by its schedule and its draws together.
 * Seeded random search over schedules, with fresh draws for each seed.
-* Exhaustive search over every schedule of a small scenario.
+* Exhaustive search over every schedule of a small scenario. A scenario
+  that draws is searched under a table of draws, which gives an agent the
+  same draw wherever it has seen and done the same.
 * Replay of a recorded schedule and its draws. A run that leaves either is
-  refused, not tolerated.
+  refused, not tolerated. Given the steps of the run it replays, a replay
+  holds each call against its step before the call is made.
+* Configurations. Where a run stands, the state of its world and what
+  each waiting agent has seen and done, is a value that a search can look
+  up by.
 * Shrinking of a failing schedule toward fewer context switches, then fewer
   agents.
 * Trace files. A run is written as JSON lines, read back and replayed. A
@@ -143,6 +149,11 @@ entries do, so both writes go through.
   policy which runs next. The list of chosen agent names is the schedule.
   Agents are started in name order, whatever order a scenario lists them
   in.
+* A policy is shown the run as it stands, as a `Moment`: the agents that
+  wait, the call each of them waits to make, every step and draw so far,
+  the first violation so far and, where the scenario has a snapshot, the
+  state of the world. A sampler is shown the same at a draw. The moment
+  shows the run when it is looked at and costs nothing until then.
 * A call is by value. An argument is taken when the agent awaits the call
   and a result when the tool returns. The tool, the agent and the trace
   each get a copy of their own of every list and dict in it, at any depth,
@@ -159,9 +170,28 @@ entries do, so both writes go through.
   schedule. It replays the failing schedule with its draws and checks that
   the trace is the same before returning it.
 * `explore.exhaust` runs every complete schedule of a scenario, depth
-  first, and replays each run before yielding it.
+  first, and replays each run before yielding it. Given a sampler, it runs
+  a scenario that draws, and refuses a sampler that gives an agent two
+  draws where it has seen and done the same.
 * `explore.replay` runs a scenario under a given schedule and gives the
-  draws it is given back to the agents that made them, in order.
+  draws it is given back to the agents that made them, in order. The
+  schedule is the names of the agents or the steps of the run that is
+  replayed. Given the steps, each call is held against its step when the
+  policy chooses, tool and arguments, and a run that would make another
+  call ends before it makes it. The searches and the oracle replay from
+  steps.
+* `configuration.local_history` gives what an agent has done and been
+  given so far, its own calls and draws in order. `configuration.at`
+  gives the configuration a run stands at: the state of the world and the
+  local history of every agent that still waits. Two runs at one
+  configuration go on alike under the same choices and draws. A value in
+  them is held by `values.key`, which tells True from 1 as a trace file
+  does.
+* `configuration.TableSampler` holds one draw for each agent, local
+  history and request, made from its seed and that place alone. Under one
+  table the agents are a program with no chance left in it, so every
+  schedule can be run, and all of them need no more draws than there are
+  places.
 * `shrink.shrink` looks for a smaller failure of the same invariant: fewer
   context switches before the invariant breaks, then fewer agents among
   the steps up to there. It moves steps of the failing schedule, runs each
@@ -178,7 +208,8 @@ entries do, so both writes go through.
   violation come out as the file holds them.
 * `oracle.serial_outcomes` runs every serial order of a scenario's agents,
   each agent making all its calls before the next makes one, and keeps the
-  state each order leaves its world in, as a snapshot function gives it.
+  state each order leaves its world in, as the scenario's snapshot gives
+  it.
   `oracle.judge` takes those outcomes and a run. It replays the run to
   look at its world and names the serial orders that end in the same
   state. With none the run failed, and it is replayed once more before
@@ -190,7 +221,8 @@ failure is stored and reported as.
 ## Writing a scenario
 
 A scenario is a world (any object whose public methods are the tools), a set
-of agents, and invariants. Each invariant has a name and says whether it
+of agents by name, and invariants. The name of an agent and the name of a
+tool are strings and nothing more. Each invariant has a name and says whether it
 must hold from the start and after every step, or only once every agent has
 finished. Every scenario with a bug has a control that differs only in the
 fix. The examples are in `anyorder/scenarios`:
@@ -267,15 +299,32 @@ none.
   that was found before it is not reported. A draw is held to the same in
   what it asks for and in what it is given, and an error of a sampler
   ends the run as well: unlike a tool's, it is never handed to the agent.
+  So does the name of an agent or of a tool that is not a string and
+  nothing more, such as an instance of a subclass of str.
 * The seeded sampler makes its draws from one stream, in the order they
   are asked for. So what an agent draws depends on the draws made before
   it, by any agent, and the same seed can give an agent another sample
-  under another schedule where it has seen and done the same. Exhaustive
-  search, shrinking and the serial-equivalence oracle need draws that
-  stay with what an agent has seen, and that is not built. Until it is,
-  none of the three runs a scenario whose agents draw: `shrink.shrink`
-  refuses a run that made draws before it runs anything, and the other
-  two end with an error at the first draw.
+  under another schedule where it has seen and done the same. The table
+  sampler does not, and an exhaustive search of a scenario that draws
+  takes one: it refuses a sampler that gives an agent two draws at one
+  place, by the place or because the run cannot follow the start of its
+  schedule. Shrinking and the serial-equivalence oracle do not run a
+  scenario whose agents draw yet: `shrink.shrink` refuses a run that made
+  draws before it runs anything, and the oracle ends with an error at the
+  first draw.
+* A table sampler seeds a generator for every draw it has not made yet,
+  with the local history of the agent written out. That costs far more
+  than a draw of the seeded sampler, once for each place.
+* A moment shows a run when it is looked at. A policy that holds on to it
+  sees the run move on. The steps and the draws it gives are the run's
+  own records and must not be changed, where the calls it gives are
+  copies.
+* A configuration is as good as the snapshot of its scenario. A snapshot
+  that leaves out something a later call or check goes by makes two runs
+  stand at one configuration and go on otherwise, and nothing here tells.
+  The tests ask it of the three examples: over every schedule, runs at
+  one configuration make the same steps from there. A configuration does
+  not say whether an invariant broke on the way, which the moment does.
 * A replay gives a draw back as it was recorded and does not ask whether a
   sampler could have given it. A trace file that holds a draw of 1 where
   the outcomes are True and False replays, if the run that comes of the 1
@@ -365,7 +414,10 @@ none.
   same trace replays the file.
 * A trace file is checked against a run of its schedule once that run is
   over, not call by call. A scenario that is not the file's can make
-  every call of the schedule before it is refused.
+  every call of the schedule before it is refused. A replay from the
+  steps of a run in memory is checked call by call, for the tool and the
+  arguments as Python compares them. The results are compared once the
+  run is over.
 * A tool's error is kept as the text Python gives it. That text can
   differ between versions of Python, and then a file that holds one does
   not replay on the other version.
