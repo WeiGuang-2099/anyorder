@@ -475,13 +475,17 @@ def test_failure_keeps_its_verdict_through_a_trace_file():
 
 def test_judge_refuses_a_run_of_another_scenario():
     # Under this schedule the same agents call the same tools in both
-    # builds. The reads, the values written and the violation differ.
+    # builds. The reads, the values written and the violation differ. The
+    # run is held against its steps as it is replayed, so it is refused
+    # at the first call that is another: buyer-1 read 1 and not 2, and
+    # waits to write 0.
     serial = oracle.serial_outcomes(oversell.naive(), oversell.snapshot)
     run = explore.replay(oversell.naive(stock=2), _BOTH_READ_FIRST)
-    with pytest.raises(
-            scheduler.ReplayDivergenceError,
-            match="of 'oversell-naive' replayed to a different trace"):
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
         oracle.judge(serial, run)
+    assert str(caught.value) == (
+        "step 3 is write_stock(value=1), but agent 'buyer-1' waits to call "
+        "write_stock(value=0)")
 
 
 def test_judge_refuses_a_run_of_another_scenario_that_would_pass():
@@ -489,14 +493,16 @@ def test_judge_refuses_a_run_of_another_scenario_that_would_pass():
     # both orders placed, and neither run breaks an invariant. Replayed
     # with two units the run ends as a serial order ends, so only its
     # steps tell that it is not a run of this scenario: the reads give 3
-    # and 2 in one and 2 and 1 in the other.
+    # and 2 in one and 2 and 1 in the other, and so do the writes that
+    # follow them.
     serial = oracle.serial_outcomes(
         oversell.naive(stock=2), oversell.snapshot)
     run = explore.replay(oversell.naive(stock=3), _ONE_THEN_THE_OTHER)
-    with pytest.raises(
-            scheduler.ReplayDivergenceError,
-            match="replayed to a different trace"):
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
         oracle.judge(serial, run)
+    assert str(caught.value) == (
+        "step 2 is write_stock(value=2), but agent 'buyer-1' waits to call "
+        "write_stock(value=1)")
 
 
 def test_judge_refuses_a_run_before_it_asks_the_snapshot_of_its_world():
@@ -512,8 +518,20 @@ def test_judge_refuses_a_run_before_it_asks_the_snapshot_of_its_world():
     run = explore.replay(oversell.naive(stock=2), _BOTH_READ_FIRST)
     with pytest.raises(
             scheduler.ReplayDivergenceError,
-            match="replayed to a different trace"):
+            match="^step 3 is write_stock\\(value=1\\), but agent "
+                  "'buyer-1' waits to call"):
         oracle.judge(serial, run)
+    # A run whose calls are those of this scenario and whose results are
+    # not is told from its record once the replay is over, and still
+    # before the snapshot is asked: here the reads are said to give 2.
+    own = explore.replay(oversell.naive(), _BOTH_READ_FIRST)
+    steps = tuple(
+        dataclasses.replace(step, result=2) if step.tool == "read_stock"
+        else step for step in own.steps)
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="replayed to a different trace"):
+        oracle.judge(serial, dataclasses.replace(own, steps=steps))
 
 
 def test_judge_refuses_a_run_whose_violation_was_taken_out():
@@ -527,12 +545,29 @@ def test_judge_refuses_a_run_whose_violation_was_taken_out():
 
 
 def test_judge_refuses_a_schedule_the_run_leaves():
-    # With one unit buyer-2 reads 0 and makes no second call.
     serial = oracle.serial_outcomes(oversell.naive(), oversell.snapshot)
-    run = explore.replay(oversell.naive(stock=2), _ONE_THEN_THE_OTHER)
+    # With one unit buyer-2 reads 0 and makes no second call: the run has
+    # four steps. Given one of them once more, the schedule is longer
+    # than the run, and without the last it is shorter.
+    run = explore.replay(oversell.naive(), _ONE_THEN_THE_OTHER[:4])
+    longer = dataclasses.replace(run, steps=run.steps + run.steps[-1:])
     with pytest.raises(
-            scheduler.ReplayDivergenceError, match="ended after 4 steps"):
-        oracle.judge(serial, run)
+            scheduler.ReplayDivergenceError,
+            match="^the run ended after 4 steps but the schedule has 5$"):
+        oracle.judge(serial, longer)
+    shorter = dataclasses.replace(run, steps=run.steps[:-1])
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the schedule ends after 3 steps but buyer-2 can still "
+                  "run$"):
+        oracle.judge(serial, shorter)
+    # And a run of two units leaves it at the first call that is another.
+    other = explore.replay(oversell.naive(stock=2), _ONE_THEN_THE_OTHER)
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^step 2 is write_stock\\(value=1\\), but agent "
+                  "'buyer-1' waits to call write_stock\\(value=0\\)$"):
+        oracle.judge(serial, other)
 
 
 def test_judge_refuses_a_failure_that_ends_otherwise_when_run_again():
@@ -645,3 +680,23 @@ def test_serial_orders_of_a_scenario_that_draws_are_not_run():
             scheduler.UnsupportedAwaitError,
             match="^agent 'a' awaited a draw, and the run has no sampler$"):
         oracle.serial_outcomes(scenario, _cells)
+
+
+def test_serial_orders_are_held_against_their_steps_when_they_are_run_again():
+    tickets = itertools.count()
+
+    async def writer(ctx: scheduler.AgentContext) -> None:
+        # What it writes outlives the run.
+        await ctx.call("put", cell="x", value=f"ticket {next(tickets)}")
+
+    scenario = scheduler.Scenario(
+        name="ticketed-cells",
+        make_world=_Cells,
+        agents={"a": writer},
+        invariants=(),
+    )
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        oracle.serial_outcomes(scenario, _cells)
+    assert str(caught.value) == (
+        "step 1 is put(cell='x', value='ticket 0'), but agent 'a' waits to "
+        "call put(cell='x', value='ticket 1')")

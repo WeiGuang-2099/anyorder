@@ -52,7 +52,7 @@ def explore(
             scheduler.SeededSampler(seed))
         if result.violation is None:
             continue
-        if replay(scenario, result.schedule, result.draws) != result:
+        if replay(scenario, result.steps, result.draws) != result:
             raise scheduler.ReplayDivergenceError(
                 f"seed {seed} broke an invariant of {scenario.name!r}, but "
                 "its schedule replayed to a different trace")
@@ -100,7 +100,7 @@ def exhaust(scenario: scheduler.Scenario) -> Iterator[scheduler.RunResult]:
                 f"a run of {scenario.name!r} ended after "
                 f"{len(result.steps)} steps, inside the {len(prefix)} steps "
                 "it was given to follow")
-        if replay(scenario, result.schedule) != result:
+        if replay(scenario, result.steps) != result:
             raise scheduler.ReplayDivergenceError(
                 f"the schedule {' '.join(result.schedule)!r} of "
                 f"{scenario.name!r} replayed to a different trace")
@@ -110,14 +110,17 @@ def exhaust(scenario: scheduler.Scenario) -> Iterator[scheduler.RunResult]:
 
 def replay(
     scenario: scheduler.Scenario,
-    schedule: Sequence[str],
+    schedule: Sequence[str | scheduler.Step],
     draws: Sequence[scheduler.Drawn] = (),
 ) -> scheduler.RunResult:
     """Runs a scenario under a recorded schedule and recorded draws.
 
     Args:
         scenario: What to run.
-        schedule: The agent to choose at each step.
+        schedule: The agent to choose at each step, or the steps of the
+            run that is replayed. Given the steps, each call is held
+            against its step before it is made, and a run that would
+            make another call ends there.
         draws: The draws of the run, in the order they were made. Each is
             given back to the agent that made it. A run that drew nothing
             has none.
@@ -129,7 +132,8 @@ def replay(
     Raises:
         ReplayDivergenceError: The schedule names an agent that is not
             waiting, ends while agents can still run, or has steps left
-            when the run ends. Or an agent asks for a draw that is not
+            when the run ends. Or an agent waits to make another call
+            than the step given for it. Or an agent asks for a draw that is not
             the next of those given: there is none left, another agent
             made it, or it was drawn from something else. Or the run
             ends with draws left, or made one after another step than

@@ -349,25 +349,56 @@ class RandomPolicy:
 
 
 class ReplayPolicy:
-    """Follows a recorded schedule and refuses to leave it."""
+    """Follows a recorded schedule and refuses to leave it.
 
-    def __init__(self, schedule: Sequence[str]) -> None:
+    An entry of the schedule is the name of the agent to choose, or the
+    step that the agent took in the run that is replayed. Given the step,
+    the policy also holds the call that the agent waits to make against
+    the step's, tool and arguments, when it chooses: a run that would make
+    another call is refused before the call is made. Given the name, such
+    a run is told from its record only once it is over.
+    """
+
+    def __init__(self, schedule: Sequence[str | Step]) -> None:
         self._schedule = tuple(schedule)
         self._position = 0
 
     def choose(self, moment: Moment) -> str:
-        waiting = moment.waiting
+        # The scheduler's own, and no copy: this looks up and compares, and
+        # changes nothing. The agents are put in name order only for a
+        # refusal to name them, which a replay that keeps to its schedule
+        # never needs.
+        pending = moment._pending
         if self._position == len(self._schedule):
             raise ReplayDivergenceError(
                 f"the schedule ends after {self._position} steps but "
-                f"{', '.join(waiting)} can still run")
-        name = self._schedule[self._position]
-        if name not in waiting:
+                f"{', '.join(moment.waiting)} can still run")
+        entry = self._schedule[self._position]
+        name = entry.agent if type(entry) is Step else entry
+        # An entry that is no name of an agent need not be one that can
+        # be looked up.
+        if type(name) is not str or name not in pending:
             raise ReplayDivergenceError(
                 f"step {self._position + 1} names {name!r}, which is not "
-                f"waiting; waiting: {', '.join(waiting)}")
+                f"waiting; waiting: {', '.join(moment.waiting)}")
+        if type(entry) is Step:
+            # As Python compares, which is how a run is held against its
+            # replay.
+            _, tool, args, _ = pending[name]
+            if tool != entry.tool or args != entry.args:
+                raise ReplayDivergenceError(
+                    f"step {self._position + 1} is "
+                    f"{_shown_call(entry.tool, entry.args)}, but agent "
+                    f"{name!r} waits to call {_shown_call(tool, args)}")
         self._position += 1
         return name
+
+
+def _shown_call(tool: str, args: Mapping[str, Any]) -> str:
+    """Returns a call as a refusal names it."""
+    shown = ", ".join(
+        f"{key}={values.shown(value)}" for key, value in args.items())
+    return f"{tool}({shown})"
 
 
 class Sampler(Protocol):

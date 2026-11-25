@@ -580,3 +580,64 @@ def test_exhaustive_search_does_not_run_a_scenario_that_draws():
             scheduler.UnsupportedAwaitError,
             match="^agent 'a' awaited a draw, and the run has no sampler$"):
         next(explore.exhaust(_counting()))
+
+
+def _ticketed(
+    invariants: Sequence[scheduler.Invariant] = (),
+) -> scheduler.Scenario:
+    """A scenario whose one call carries a number that outlives the run."""
+    tickets = itertools.count()
+
+    class Board:
+        def post(self, ticket: int) -> None:
+            pass
+
+    async def clerk(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("post", ticket=next(tickets))
+
+    return scheduler.Scenario(
+        name="ticketed",
+        make_world=Board,
+        agents={"a": clerk},
+        invariants=invariants,
+    )
+
+
+def test_replay_takes_the_steps_of_a_run_for_its_schedule():
+    scenario = oversell.naive()
+    run = explore.replay(scenario, _BOTH_READ_FIRST)
+    assert explore.replay(scenario, run.steps) == run
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the run ended after 6 steps but the schedule has 7$"):
+        explore.replay(scenario, run.steps + run.steps[-1:])
+
+
+def test_replay_of_steps_ends_a_run_at_the_first_call_that_is_another():
+    scenario = oversell.naive()
+    run = explore.replay(oversell.naive(stock=2), _BOTH_READ_FIRST)
+    # With one unit both buyers read 1 and not 2, which a replay is told
+    # only by the calls that come of it: the first write stores 0.
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        explore.replay(scenario, run.steps)
+    assert str(caught.value) == (
+        "step 3 is write_stock(value=1), but agent 'buyer-1' waits to call "
+        "write_stock(value=0)")
+    # Given the names it makes all six calls, and is another run.
+    assert explore.replay(scenario, run.schedule) != run
+
+
+def test_search_holds_a_failure_against_its_steps_as_it_replays_it():
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        explore.explore(_ticketed((_ALWAYS_FAILS,)), range(1))
+    assert str(caught.value) == (
+        "step 1 is post(ticket=0), but agent 'a' waits to call "
+        "post(ticket=1)")
+
+
+def test_exhaustive_search_holds_each_run_against_its_steps():
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        next(explore.exhaust(_ticketed()))
+    assert str(caught.value) == (
+        "step 1 is post(ticket=0), but agent 'a' waits to call "
+        "post(ticket=1)")

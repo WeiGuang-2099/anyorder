@@ -9,6 +9,7 @@ import dataclasses
 import enum
 import functools
 import inspect
+import itertools
 import types
 from collections.abc import Coroutine, Iterator, Mapping
 from typing import Any
@@ -2152,3 +2153,133 @@ def test_draw_before_the_first_call_is_made_before_the_fresh_world_is_asked():
         "always-dark", "the lamp is lit", 0)
     assert looking.asked[0]["violation"] is None
     assert looking.choices[0]["violation"] == result.violation
+
+
+def _ticketed(
+    worlds: list[_Log] | None = None, tools: Iterator[str] | None = None
+) -> scheduler.Scenario:
+    """An agent that records a ticket whose number outlives the run.
+
+    So its call is another call in every run. With tools, the tool it
+    calls is the next of them.
+    """
+    tickets = itertools.count()
+
+    async def clerk(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("record", entry=ctx.name)
+        tool = "record" if tools is None else next(tools)
+        if tool == "record":
+            await ctx.call("record", entry=f"ticket {next(tickets)}")
+        else:
+            await ctx.call(tool)
+
+    def make_world() -> _Log:
+        world = _Log()
+        if worlds is not None:
+            worlds.append(world)
+        return world
+
+    return scheduler.Scenario(
+        name="ticketed", make_world=make_world,
+        agents={"a": clerk, "b": _writer}, invariants=())
+
+
+def test_replay_of_steps_refuses_another_call_before_it_is_made():
+    worlds: list[_Log] = []
+    scenario = _ticketed(worlds)
+    first = scheduler.run(scenario, scheduler.ReplayPolicy("aabb"))
+    assert _entries(first) == ["a", "ticket 0", "b:1", "b:2"]
+    # Given the names, a replay makes every call of the schedule and only
+    # then is seen to be another run.
+    by_names = scheduler.run(
+        scenario, scheduler.ReplayPolicy(first.schedule))
+    assert by_names != first
+    assert worlds[1].entries == ["a", "ticket 1", "b:1", "b:2"]
+    # Given the steps, it holds each call against its step when it
+    # chooses, and the call that is another is not made.
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.run(scenario, scheduler.ReplayPolicy(first.steps))
+    assert str(caught.value) == (
+        "step 2 is record(entry='ticket 0'), but agent 'a' waits to call "
+        "record(entry='ticket 2')")
+    assert worlds[2].entries == ["a"]
+
+
+def test_replay_of_steps_refuses_a_call_of_another_tool():
+    scenario = _ticketed(tools=iter(["record", "size"]))
+    first = scheduler.run(scenario, scheduler.ReplayPolicy("aabb"))
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.run(scenario, scheduler.ReplayPolicy(first.steps))
+    assert str(caught.value) == (
+        "step 2 is record(entry='ticket 0'), but agent 'a' waits to call "
+        "size()")
+
+
+def test_replay_of_steps_refuses_a_call_with_other_arguments_than_its_step():
+    async def caller(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("tag", label="x", into=["a", ["b"]])
+
+    def run(*steps: scheduler.Step) -> scheduler.RunResult:
+        return scheduler.run(_shelf(a=caller), scheduler.ReplayPolicy(steps))
+
+    step = scheduler.Step(
+        "a", "tag", {"label": "x", "into": ["a", ["b"]]}, None)
+    assert run(step).steps == (step,)
+    for args, shown in [
+        ({"label": "x"}, "tag(label='x')"),
+        ({"label": "x", "into": ["a", ["c"]]},
+         "tag(label='x', into=['a', ['c']])"),
+        ({"label": "x", "into": ["a", ["b"]], "more": 1},
+         "tag(label='x', into=['a', ['b']], more=1)"),
+        ({}, "tag()"),
+    ]:
+        with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+            run(dataclasses.replace(step, args=args))
+        assert str(caught.value) == (
+            f"step 1 is {shown}, but agent 'a' waits to call "
+            "tag(label='x', into=['a', ['b']])")
+
+
+def test_replay_of_steps_takes_a_call_that_is_equal_as_runs_are_compared():
+    async def caller(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("count", seen=(True, 2))
+
+    # The step has 1 where the call has True, and 2.0 where it has 2:
+    # equal as Python compares, which is how a run is held against its
+    # replay. A trace file holds them apart, as text.
+    step = scheduler.Step("a", "count", {"seen": (1, 2.0)}, 2)
+    result = scheduler.run(_shelf(a=caller), scheduler.ReplayPolicy([step]))
+    assert result.steps == (step,)
+    assert type(result.steps[0].args["seen"][0]) is bool
+
+
+def test_replay_of_steps_names_an_agent_that_is_not_waiting_as_names_do():
+    first = scheduler.run(_scenario(), scheduler.ReplayPolicy("aabb"))
+    steps = (first.steps[0], first.steps[1], first.steps[1], first.steps[2])
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.run(_scenario(), scheduler.ReplayPolicy(steps))
+    assert str(caught.value) == (
+        "step 3 names 'a', which is not waiting; waiting: b")
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the schedule ends after 2 steps but b can still run$"):
+        scheduler.run(_scenario(), scheduler.ReplayPolicy(first.steps[:2]))
+
+
+def test_replay_takes_names_and_steps_in_one_schedule():
+    first = scheduler.run(_scenario(), scheduler.ReplayPolicy("abab"))
+    mixed = ("a", first.steps[1], "a", first.steps[3])
+    assert scheduler.run(_scenario(), scheduler.ReplayPolicy(mixed)) == first
+
+
+def test_refusal_of_a_call_shows_no_more_than_the_start_of_an_argument():
+    async def caller(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("record", entry="y" * 500)
+
+    step = scheduler.Step("a", "record", {"entry": "x" * 500}, None)
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.run(_scenario(a=caller), scheduler.ReplayPolicy([step]))
+    assert str(caught.value) == (
+        f"step 1 is record(entry='{'x' * 199}... (502 characters)), but "
+        f"agent 'a' waits to call record(entry='{'y' * 199}... (502 "
+        "characters))")

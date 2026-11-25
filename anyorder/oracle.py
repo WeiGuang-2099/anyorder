@@ -212,7 +212,7 @@ def _replayed(
             another trace.
     """
     def replay(watched: scheduler.Scenario) -> scheduler.RunResult:
-        replayed = explore.replay(watched, result.schedule)
+        replayed = explore.replay(watched, result.steps)
         # Here, before the snapshot is asked: the world of another run
         # may be one the snapshot was not written for.
         if replayed != result:

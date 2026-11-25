@@ -147,7 +147,7 @@ class _FollowPolicy:
 
 def _confirm(scenario: scheduler.Scenario, run: scheduler.RunResult) -> None:
     """Replays a run and refuses it if the trace is not the same."""
-    if explore.replay(scenario, run.schedule) != run:
+    if explore.replay(scenario, run.steps) != run:
         raise scheduler.ReplayDivergenceError(
             f"the schedule {' '.join(run.schedule)!r} of {scenario.name!r} "
             "replayed to a different trace")

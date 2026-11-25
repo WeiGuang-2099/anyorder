@@ -526,3 +526,27 @@ def test_run_that_drew_is_not_shrunk():
         shrink.shrink(scenario, failure)
     # Refused before anything was run.
     assert not built
+
+
+def test_shrinking_holds_a_run_against_its_steps_as_it_replays_it():
+    tickets = itertools.count()
+
+    async def caller(ctx: scheduler.AgentContext) -> None:
+        # What it calls out outlives the run.
+        await ctx.call("call_out", name=f"ticket {next(tickets)}")
+
+    scenario = scheduler.Scenario(
+        name="ticketed-roll",
+        make_world=_Roll,
+        agents={"a": caller},
+        invariants=(
+            scheduler.Invariant(
+                "silence", lambda roll: "somebody called", every_step=False),
+        ),
+    )
+    failure = scheduler.run(scenario, scheduler.RandomPolicy(0))
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        shrink.shrink(scenario, failure)
+    assert str(caught.value) == (
+        "step 1 is call_out(name='ticket 0'), but agent 'a' waits to call "
+        "call_out(name='ticket 1')")
