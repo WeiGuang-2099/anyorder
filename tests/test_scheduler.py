@@ -6,6 +6,7 @@ The samplers' tests come last: the seeded one, then the one that replays.
 import asyncio
 import collections
 import dataclasses
+import enum
 import functools
 import inspect
 import types
@@ -1174,6 +1175,103 @@ def test_tool_error_is_plain_text_whatever_the_error_says_it_is():
     assert error == scheduler.Raised("Boom", "boom")
     assert type(error.kind) is str and type(error.message) is str
     assert len(result.steps) == 2
+
+
+class _Sly(str):
+    """A name that says it does not start with an underscore."""
+
+    def startswith(self, *args: Any) -> bool:
+        return False
+
+
+class _Role(str, enum.Enum):
+    SCRIBE = "record"
+
+
+@pytest.mark.parametrize(
+    "tool,shown",
+    [
+        (_Loud("record"), "'record', of type _Loud"),
+        (_Sly("_hidden"), "'_hidden', of type _Sly"),
+        (_Role.SCRIBE, "<_Role.SCRIBE: 'record'>, of type _Role"),
+        (b"record", "b'record', of type bytes"),
+        (None, "None, of type NoneType"),
+        (7, "7, of type int"),
+    ],
+    ids=["subclass", "sly", "enum", "bytes", "none", "int"])
+def test_tool_whose_name_is_no_string_ends_the_run_at_the_await(tool, shown):
+    handled = []
+
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("record", entry=ctx.name)
+        try:
+            await ctx.call(tool, entry="late")
+        except Exception:
+            # The refusal is not the agent's to handle.
+            handled.append(ctx.name)
+
+    worlds: list[_Log] = []
+
+    def make_world() -> _Log:
+        worlds.append(_Log())
+        return worlds[-1]
+
+    coroutines = {}
+    scenario = dataclasses.replace(
+        _scenario(a=_kept(_writer, coroutines), z=_kept(asker, coroutines)),
+        make_world=make_world)
+    # A name that is more than a string can say what it likes of itself:
+    # that it is equal to another name, or that it starts with no
+    # underscore. No trace file holds one either. Refused when z awaits
+    # the call, after its first step: the policy is not asked again, so
+    # a's call, which the schedule has next, is not made.
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        scheduler.run(scenario, scheduler.ReplayPolicy(["z", "a"]))
+    assert str(caught.value) == (
+        f"agent 'z' cannot call a tool named {shown}: a tool's name is a "
+        "string")
+    assert not handled
+    assert worlds[0].entries == ["z"]
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "z": inspect.CORO_CLOSED}
+
+
+@pytest.mark.parametrize(
+    "name,shown",
+    [
+        (1, "1, of type int"),
+        (None, "None, of type NoneType"),
+        (_Loud("b"), "'b', of type _Loud"),
+        (("b",), "('b',), of type tuple"),
+    ],
+    ids=["int", "none", "subclass", "tuple"])
+def test_agent_whose_name_is_no_string_ends_the_run_before_it_starts(
+    name, shown
+):
+    started = []
+    worlds = []
+
+    async def starter(ctx: scheduler.AgentContext) -> None:
+        started.append(ctx.name)
+        await ctx.call("record", entry="started")
+
+    def make_world() -> _Log:
+        worlds.append(_Log())
+        return worlds[-1]
+
+    scenario = scheduler.Scenario(
+        name="log", make_world=make_world,
+        agents={"a": starter, name: starter, "c": starter}, invariants=())
+    # Before the names are put in order, which Python cannot do for a
+    # string and a number, and before any agent is started or the world
+    # is made.
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        scheduler.run(scenario, scheduler.RandomPolicy(0))
+    assert str(caught.value) == (
+        f"an agent cannot be named {shown}: an agent's name is a string")
+    assert not started and not worlds
 
 
 class _Listed:

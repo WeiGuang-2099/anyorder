@@ -63,7 +63,8 @@ class UnsupportedValueError(SchedulerError):
 
     An argument or a result of a call, or what a draw asked for or was
     given, is not a value a call carries. Or a sampler was asked to draw
-    from what it does not draw from.
+    from what it does not draw from. Or the name of an agent or of a tool
+    is not a string and nothing more.
     """
 
 
@@ -72,7 +73,8 @@ class Effect:
     """One tool call an agent is waiting to make.
 
     Attributes:
-        tool: Name of a public method on the scenario's world.
+        tool: Name of a public method on the scenario's world: a str and
+            nothing more.
         args: Keyword arguments for the call.
     """
 
@@ -169,8 +171,9 @@ class Scenario:
         name: Short identifier for reports.
         make_world: Builds a fresh world for each run. A world shared
             between runs breaks replay.
-        agents: Agent functions by name. A run starts them in name order,
-            whatever order they are listed in.
+        agents: Agent functions by name. A name is a str and nothing more.
+            A run starts the agents in name order, whatever order they
+            are listed in.
         invariants: What must stay true of the world. Each says when it
             must hold.
     """
@@ -447,18 +450,19 @@ def run(
             the call, before the tool runs and before the policy is
             asked again. A result is refused once its tool has run. A
             draw is refused alike: what it asks for before the sampler
-            is asked, and what the sampler gave once it gave it.
+            is asked, and what the sampler gave once it gave it. Or a
+            name is not a string and nothing more: an agent's before
+            anything is started, a tool's when its agent awaits the
+            call.
     """
+    names = _names(scenario)
     world = scenario.make_world()
     pending: _Pending = {}
     steps: list[Step] = []
     draws: list[Drawn] = []
     draw = functools.partial(_drawn, sampler, draws, steps)
     try:
-        # In name order, as a policy is shown the waiting agents: what an
-        # agent does before its first call must not depend on the order a
-        # scenario happens to list its agents in.
-        for name in sorted(scenario.agents):
+        for name in names:
             agent = scenario.agents[name]
             _advance(pending, name, agent(AgentContext(name)), None, draw)
         violation = _first_violation(scenario, world, 0, every_step=True)
@@ -490,6 +494,24 @@ def run(
         violation = _first_violation(
             scenario, world, len(steps), every_step=False)
     return RunResult(tuple(steps), violation, tuple(draws))
+
+
+def _names(scenario: Scenario) -> list[str]:
+    """Returns the names of a scenario's agents in the order they are started.
+
+    In name order, as a policy is shown the waiting agents: what an agent
+    does before its first call must not depend on the order a scenario
+    happens to list its agents in.
+
+    Raises:
+        UnsupportedValueError: A name is not a string and nothing more.
+    """
+    for name in scenario.agents:
+        if type(name) is not str:
+            raise UnsupportedValueError(
+                f"an agent cannot be named {values.shown(name)}, of type "
+                f"{type(name).__name__}: an agent's name is a string")
+    return sorted(scenario.agents)
 
 
 def _advance(
@@ -531,6 +553,14 @@ def _advance(
             raise
     try:
         tool = awaited.tool
+        if type(tool) is not str:
+            # More than a string can say what it likes of itself: that it
+            # is equal to another name, or that it starts with no
+            # underscore.
+            raise UnsupportedValueError(
+                f"agent {name!r} cannot call a tool named "
+                f"{values.shown(tool)}, of type {type(tool).__name__}: a "
+                "tool's name is a string")
         args, fixed = _taken_args(name, tool, awaited.args)
     except BaseException:
         # Whatever was raised, an interrupt too: the agent is not among

@@ -1607,34 +1607,56 @@ def test_run_whose_message_is_not_a_string_is_not_written():
         tracefile.dumps(scenario, run)
 
 
-def test_run_whose_names_are_not_strings_is_not_written():
+def test_run_whose_names_are_not_strings_is_not_made_and_not_written():
     async def speaker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("say", value=1)
+
+    async def sly_speaker(ctx: scheduler.AgentContext) -> None:
         await ctx.call(_Name("say"), value=1)
 
-    def scenario(name: Any, agent: Any) -> scheduler.Scenario:
+    def scenario(name: Any, agent: Any, speaks: Any) -> scheduler.Scenario:
         return scheduler.Scenario(
-            name=name, make_world=_Echo, agents={agent: speaker},
+            name=name, make_world=_Echo, agents={agent: speaks},
             invariants=())
 
-    numbered = scenario("echo", 1)
+    # The scheduler makes no run with an agent or a tool whose name is
+    # not a string and nothing more.
+    numbered = scenario("echo", 1, speaker)
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^an agent cannot be named 1, of type int"):
+        explore.replay(numbered, (1,))
+    named = scenario("echo", "a", sly_speaker)
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match="^agent 'a' cannot call a tool named 'say', of type "
+                  "_Name"):
+        explore.replay(named, ("a",))
+
+    # Put together by hand, such a run is still not written.
+    def built(agent: Any, tool: Any) -> scheduler.RunResult:
+        return scheduler.RunResult(
+            (scheduler.Step(agent, tool, {"value": 1}, 1),), None)
+
     with pytest.raises(
             TypeError,
             match="step 1: a trace file does not hold 1, of type int, as "
                   "the agent's name"):
-        tracefile.dumps(numbered, explore.replay(numbered, (1,)))
-    named = scenario("echo", "a")
+        tracefile.dumps(numbered, built(1, "say"))
     with pytest.raises(
             TypeError,
             match="step 1: a trace file does not hold 'say', of type "
                   "_Name, as the tool's name"):
-        tracefile.dumps(named, explore.replay(named, ("a",)))
-    unnamed = scenario(None, "a")
+        tracefile.dumps(named, built("a", _Name("say")))
+    # The name of a scenario is the file's alone to refuse, and so is a
+    # string with a surrogate: a run with either is made.
+    unnamed = scenario(None, "a", speaker)
     with pytest.raises(
             TypeError,
             match="does not hold None, of type NoneType, as the "
                   "scenario's name"):
         tracefile.dumps(unnamed, _said(1))
-    split = scenario("echo", chr(0xD83D) + chr(0xDE00))
+    split = scenario("echo", chr(0xD83D) + chr(0xDE00), speaker)
     with pytest.raises(TypeError, match="step 1: .* with a surrogate"):
         tracefile.dumps(split, explore.replay(split, tuple(split.agents)))
 
