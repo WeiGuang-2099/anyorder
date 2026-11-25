@@ -2372,14 +2372,25 @@ def test_state_of_a_world_is_what_the_scenarios_snapshot_gives():
 
 @pytest.mark.parametrize(
     "entry,shown",
-    [(["a"], "['a']"), ({"a": 1}, "{'a': 1}"), (None, "None"), (7, "7")],
-    ids=["list", "dict", "none", "int"])
+    [
+        (["a"], "['a'], of type list"),
+        ({"a": 1}, "{'a': 1}, of type dict"),
+        (None, "None, of type NoneType"),
+        (7, "7, of type int"),
+        # Equal to the name of an agent that waits, and more than a
+        # string: no agent has such a name.
+        (_Loud("a"), "'a', of type _Loud"),
+        (_Role.SCRIBE, "<_Role.SCRIBE: 'record'>, of type _Role"),
+    ],
+    ids=["list", "dict", "none", "int", "subclass", "enum"])
 def test_replay_refuses_an_entry_that_is_no_name_of_an_agent(entry, shown):
-    # Also one that cannot be looked up: it names nobody that waits.
+    # Also one that cannot be looked up, and in words of its own: to say
+    # of 'a' that it is not waiting, beside a that waits, would say
+    # nothing.
     with pytest.raises(scheduler.ReplayDivergenceError) as caught:
         scheduler.run(_scenario(), scheduler.ReplayPolicy([entry]))
     assert str(caught.value) == (
-        f"step 1 names {shown}, which is not waiting; waiting: a, b")
+        f"step 1 names {shown}: an agent's name is a string")
 
 
 def test_replay_of_steps_refuses_another_tool_called_with_the_same_arguments():
@@ -2409,9 +2420,181 @@ class _Stride(scheduler.Step):
 
 def test_replay_takes_a_step_and_nothing_that_passes_for_one():
     stride = _Stride("a", "record", {"entry": "a:1"}, None)
-    # Neither a name nor a step: it names nobody that waits.
+    # Neither a name nor a step: it names nobody.
     with pytest.raises(
             scheduler.ReplayDivergenceError,
-            match="^step 1 names _Stride\\(agent='a', .*\\), which is not "
-                  "waiting; waiting: a, b$"):
+            match="^step 1 names _Stride\\(agent='a', .*\\), of type "
+                  "_Stride: an agent's name is a string$"):
         scheduler.run(_scenario(), scheduler.ReplayPolicy([stride]))
+    # Nor is a step whose agent is more than a string the step of a run.
+    loud = scheduler.Step(_Loud("a"), "record", {"entry": "a:1"}, None)
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^step 1 names 'a', of type _Loud: an agent's name is a "
+                  "string$"):
+        scheduler.run(_scenario(), scheduler.ReplayPolicy([loud]))
+
+
+class _Who(str, enum.Enum):
+    A = "a"
+
+
+@pytest.mark.parametrize(
+    "chosen,shown",
+    [
+        (_Loud("a"), "'a', of type _Loud"),
+        (_Who.A, "<_Who.A: 'a'>, of type _Who"),
+        (None, "None, of type NoneType"),
+    ],
+    ids=["subclass", "enum", "none"])
+def test_policy_that_chooses_what_is_no_plain_string_ends_the_run(
+    chosen, shown
+):
+    class Sly:
+        def choose(self, moment: scheduler.Moment) -> Any:
+            return chosen
+
+    worlds: list[_Log] = []
+
+    def make_world() -> _Log:
+        worlds.append(_Log())
+        return worlds[-1]
+
+    coroutines = {}
+    scenario = dataclasses.replace(
+        _scenario(a=_kept(_writer, coroutines), b=_kept(_writer, coroutines)),
+        make_world=make_world)
+    # Equal to the name of an agent that waits, it would be looked up and
+    # would then be the agent's name: in the steps, for the sampler and
+    # among those that wait. No replay and no trace file takes such a run.
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        scheduler.run(scenario, Sly())
+    assert str(caught.value) == (
+        f"a policy cannot choose {shown}: an agent's name is a string")
+    assert worlds[0].entries == []
+    assert {
+        name: inspect.getcoroutinestate(coroutine)
+        for name, coroutine in coroutines.items()
+    } == {"a": inspect.CORO_CLOSED, "b": inspect.CORO_CLOSED}
+
+
+class _CalledStr(type):
+    """A metaclass whose classes say that they are called str."""
+
+    @property
+    def __name__(cls) -> str:
+        return "str"
+
+
+class _Masked(str, metaclass=_CalledStr):
+    pass
+
+
+class _MaskedBox(metaclass=_CalledStr):
+    """Something an agent can await and that is no call and no draw."""
+
+    def __await__(self) -> Any:
+        value = yield self
+        return value
+
+
+def test_refusal_names_a_type_as_type_gives_it_whatever_the_class_says():
+    assert _Masked.__name__ == "str"
+
+    async def caller(ctx: scheduler.AgentContext) -> None:
+        await ctx.call(_Masked("record"), entry="x")
+
+    async def sleeper(ctx: scheduler.AgentContext) -> None:
+        await _MaskedBox()
+
+    async def packer(ctx: scheduler.AgentContext) -> None:
+        await scheduler.Effect("record", _MaskedBox())
+
+    cases = [
+        (scheduler.Scenario(
+            "log", _Log, {_Masked("b"): _writer}, ()),
+         "an agent cannot be named 'b', of type _Masked: an agent's name "
+         "is a string"),
+        (_scenario(a=caller),
+         "agent 'a' cannot call a tool named 'record', of type _Masked: a "
+         "tool's name is a string"),
+        (_scenario(a=sleeper),
+         "agent 'a' awaited _MaskedBox; an agent may only await "
+         "AgentContext.call and AgentContext.draw"),
+        (_scenario(a=packer),
+         "agent 'a' cannot call 'record': its arguments are of type "
+         "_MaskedBox, not a mapping"),
+    ]
+    for scenario, message in cases:
+        with pytest.raises(scheduler.SchedulerError) as caught:
+            scheduler.run(scenario, scheduler.RandomPolicy(0))
+        assert str(caught.value) == message
+
+
+class _Shifty(Mapping):
+    """Agents by name, with other names each time they are walked."""
+
+    def __init__(self, agents: dict[str, scheduler.Agent]) -> None:
+        self._agents = agents
+        self.walks = 0
+
+    def __getitem__(self, name: str) -> scheduler.Agent:
+        return self._agents[name]
+
+    def __iter__(self) -> Iterator[str]:
+        self.walks += 1
+        if self.walks == 1:
+            return iter(self._agents)
+        return iter([_Loud(name) for name in self._agents])
+
+    def __len__(self) -> int:
+        return len(self._agents)
+
+
+def test_agents_are_walked_once_for_their_names():
+    agents = _Shifty({"a": _writer, "b": _writer})
+    result = scheduler.run(
+        scheduler.Scenario("log", _Log, agents, ()),
+        scheduler.RandomPolicy(0))
+    # The names that were looked at are the names the agents run under.
+    assert agents.walks == 1
+    assert {type(step.agent) for step in result.steps} == {str}
+
+
+@pytest.mark.parametrize(
+    "args,shown",
+    [
+        (None, "record with None"),
+        ((), "record with ()"),
+        ([("entry", "a:1")], "record with [('entry', 'a:1')]"),
+        ({1: "x"}, "record(1='x')"),
+    ],
+    ids=["none", "tuple", "pairs", "key-no-string"])
+def test_replay_refuses_a_step_made_by_hand_as_a_replay_refuses(args, shown):
+    step = scheduler.Step("a", "record", args, None)
+    # Its arguments are no arguments of a call, and the refusal is still
+    # that of a replay that left its schedule, not an error of its own.
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.run(_scenario(), scheduler.ReplayPolicy([step]))
+    assert str(caught.value) == (
+        f"step 1 is {shown}, but agent 'a' waits to call "
+        "record(entry='a:1')")
+
+
+def test_replay_refuses_a_step_whose_tool_is_no_string_as_a_replay_refuses():
+    step = scheduler.Step("a", ("record",), {"entry": "a:1"}, None)
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.run(_scenario(), scheduler.ReplayPolicy([step]))
+    assert str(caught.value) == (
+        "step 1 is ('record',)(entry='a:1'), but agent 'a' waits to call "
+        "record(entry='a:1')")
+
+
+def test_refusal_of_a_state_shows_no_more_than_the_start_of_it():
+    scenario = dataclasses.replace(
+        _lamp(1), snapshot=lambda lamp: ["x" * 500])
+    with pytest.raises(TypeError) as caught:
+        scheduler.run(scenario, _Stateful())
+    assert str(caught.value) == (
+        f"the snapshot of 'lamp' gave ['{'x' * 198}... (504 characters), "
+        "which cannot be hashed: unhashable type: 'list'")

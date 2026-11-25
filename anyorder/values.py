@@ -50,8 +50,9 @@ ROOM = _LINE_LEVELS - 1
 _SHOWN = 200
 
 # The name of a class as type itself gives it, whatever the class or its
-# metaclass says its name is.
-_name_of = type.__dict__["__name__"].__get__
+# metaclass says its name is. For a refusal to name the type of what it
+# refuses.
+name_of = type.__dict__["__name__"].__get__
 
 
 class NotTakenError(TypeError):
@@ -129,7 +130,7 @@ def take(value: Any, room: int = ROOM) -> Any:
         return Raised(
             take(value.kind, room - 2), take(value.message, room - 2))
     raise NotTakenError(
-        f"a call does not carry {shown(value)}, of type {_name_of(kind)}")
+        f"a call does not carry {shown(value)}, of type {name_of(kind)}")
 
 
 def key(value: Any, room: int = ROOM) -> Hashable:
@@ -175,7 +176,7 @@ def key(value: Any, room: int = ROOM) -> Hashable:
         left = _left(room, 2)
         return ("raised", key(value.kind, left), key(value.message, left))
     raise NotTakenError(
-        f"a call does not carry {shown(value)}, of type {_name_of(kind)}")
+        f"a call does not carry {shown(value)}, of type {name_of(kind)}")
 
 
 def _left(room: int, levels: int) -> int:

@@ -377,8 +377,8 @@ def state_of(scenario: Scenario, world: Any) -> Hashable:
         hash(state)
     except TypeError as error:
         raise TypeError(
-            f"the snapshot of {scenario.name!r} gave {state!r}, which "
-            f"cannot be hashed: {error}") from None
+            f"the snapshot of {scenario.name!r} gave {values.shown(state)}, "
+            f"which cannot be hashed: {error}") from None
     return state
 
 
@@ -408,6 +408,12 @@ class ReplayPolicy:
     the step's, tool and arguments, when it chooses: a run that would make
     another call is refused before the call is made. Given the name, such
     a run is told from its record only once it is over.
+
+    The call is held against the step as Python compares, and it is the
+    scheduler's own call that is compared, not a copy. So a step must be
+    one that a run made, or hold nothing but values a call carries: a
+    value with a way of its own to compare could pass for any call, and
+    could change the call it is compared with.
     """
 
     def __init__(self, schedule: Sequence[str | Step]) -> None:
@@ -426,9 +432,16 @@ class ReplayPolicy:
                 f"{', '.join(moment.waiting)} can still run")
         entry = self._schedule[self._position]
         name = entry.agent if type(entry) is Step else entry
-        # An entry that is no name of an agent need not be one that can
-        # be looked up.
-        if type(name) is not str or name not in pending:
+        if type(name) is not str:
+            # No agent has such a name, and it need not be one that can
+            # be looked up. Said in words of its own: an instance of a
+            # subclass of str can be equal to the name of an agent that
+            # waits.
+            raise ReplayDivergenceError(
+                f"step {self._position + 1} names {values.shown(name)}, of "
+                f"type {values.name_of(type(name))}: an agent's name is a "
+                "string")
+        if name not in pending:
             raise ReplayDivergenceError(
                 f"step {self._position + 1} names {name!r}, which is not "
                 f"waiting; waiting: {', '.join(moment.waiting)}")
@@ -445,11 +458,20 @@ class ReplayPolicy:
         return name
 
 
-def _shown_call(tool: str, args: Mapping[str, Any]) -> str:
-    """Returns a call as a refusal names it."""
+def _shown_call(tool: Any, args: Any) -> str:
+    """Returns a call as a refusal names it.
+
+    Also the call of a step that was made by hand, whose tool need be no
+    string and whose arguments no mapping: the refusal must not be another
+    error.
+    """
+    name = tool if type(tool) is str else values.shown(tool)
+    if not isinstance(args, Mapping):
+        return f"{name} with {values.shown(args)}"
     shown = ", ".join(
-        f"{key}={values.shown(value)}" for key, value in args.items())
-    return f"{tool}({shown})"
+        f"{values.shown(key) if type(key) is not str else key}="
+        f"{values.shown(value)}" for key, value in args.items())
+    return f"{name}({shown})"
 
 
 class Sampler(Protocol):
@@ -623,7 +645,8 @@ def run(
             is asked, and what the sampler gave once it gave it. Or a
             name is not a string and nothing more: an agent's before
             anything is started, a tool's when its agent awaits the
-            call.
+            call, and the name a policy chooses before anything is
+            looked up by it.
     """
     names = _names(scenario)
     world = scenario.make_world()
@@ -640,6 +663,13 @@ def run(
         moment._violation = violation
         while pending:
             name = policy.choose(moment)
+            if type(name) is not str:
+                # It would be the agent's name from here on: in the steps,
+                # for the sampler and among those that wait.
+                raise UnsupportedValueError(
+                    f"a policy cannot choose {values.shown(name)}, of type "
+                    f"{values.name_of(type(name))}: an agent's name is a "
+                    "string")
             coroutine, tool, args, fixed = pending[name]
             # A copy of its own for the tool: what it does to a list it is
             # given must not show in the trace.
@@ -679,12 +709,16 @@ def _names(scenario: Scenario) -> list[str]:
     Raises:
         UnsupportedValueError: A name is not a string and nothing more.
     """
-    for name in scenario.agents:
+    # Walked once: a mapping that is no dict need not give the same names
+    # a second time.
+    names = list(scenario.agents)
+    for name in names:
         if type(name) is not str:
             raise UnsupportedValueError(
                 f"an agent cannot be named {values.shown(name)}, of type "
-                f"{type(name).__name__}: an agent's name is a string")
-    return sorted(scenario.agents)
+                f"{values.name_of(type(name))}: an agent's name is a "
+                "string")
+    return sorted(names)
 
 
 def _advance(
@@ -716,8 +750,9 @@ def _advance(
         if not isinstance(awaited, Draw):
             _close(coroutine)
             raise UnsupportedAwaitError(
-                f"agent {name!r} awaited {type(awaited).__name__}; an agent "
-                "may only await AgentContext.call and AgentContext.draw")
+                f"agent {name!r} awaited "
+                f"{values.name_of(type(awaited))}; an agent may only await "
+                "AgentContext.call and AgentContext.draw")
         try:
             value = draw(name, awaited.request)
         except BaseException:
@@ -732,8 +767,8 @@ def _advance(
             # underscore.
             raise UnsupportedValueError(
                 f"agent {name!r} cannot call a tool named "
-                f"{values.shown(tool)}, of type {type(tool).__name__}: a "
-                "tool's name is a string")
+                f"{values.shown(tool)}, of type "
+                f"{values.name_of(type(tool))}: a tool's name is a string")
         args, fixed = _taken_args(name, tool, awaited.args)
     except BaseException:
         # Whatever was raised, an interrupt too: the agent is not among
@@ -817,7 +852,7 @@ def _taken_args(
         if not isinstance(given, Mapping):
             raise UnsupportedValueError(
                 f"agent {name!r} cannot call {tool!r}: its arguments are of "
-                f"type {type(given).__name__}, not a mapping")
+                f"type {values.name_of(type(given))}, not a mapping")
         given = dict(given)
     if not given:
         # Most reads: nothing to take.
