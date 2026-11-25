@@ -194,6 +194,22 @@ def test_demo_does_not_catch_a_file_that_replays_differently(
     assert capsys.readouterr().out == ""
 
 
+def test_demo_does_not_catch_a_file_with_a_draw_its_scenario_does_not_make(
+    tmp_path, capsys
+):
+    path, _ = _saved_failure(tmp_path, capsys)
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    # No buyer draws. The file now says one did, after the first read.
+    lines.insert(
+        2, '{"kind": "draw", "agent": "buyer-1", "request": 1, "value": 1}\n')
+    path.write_text("".join(lines), encoding="utf-8")
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the run made 0 draws but 1 were given$"):
+        demo.main(["--replay", str(path)])
+    assert capsys.readouterr().out == ""
+
+
 def test_demo_exits_with_2_on_a_file_that_is_not_a_trace_file(
     tmp_path, capsys
 ):

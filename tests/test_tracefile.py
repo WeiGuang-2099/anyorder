@@ -1,4 +1,8 @@
-"""Checks trace files: what is written, read, refused and replayed."""
+"""Checks trace files: what is written, read, refused and replayed.
+
+The reader's tests come first and work from text written by hand, those of
+steps and then those of draws. The writer's tests follow in the same order.
+"""
 
 import collections
 import dataclasses
@@ -238,8 +242,8 @@ _NOT_A_TRACE_FILE = [
     # json counts lines too, and its count is not the file's.
     (_text(_LINES[:2] + ("# a note",) + _LINES[2:]),
      r"line 3 cannot be read: Expecting value \(column 1\)$"),
-    (_edited(3, '"kind": "step"', '"kind": "draw"'),
-     'line 3 is of kind "draw", not "step"'),
+    (_edited(3, '"kind": "step"', '"kind": "note"'),
+     'line 3 is of kind "note", not "step" or "draw"$'),
     (_edited(2, '"result": 1', '"result": 1, "hash": "ab"'),
      "line 2 holds the keys agent, args, hash, kind, result, tool, not "
      "agent, args, kind, result, tool"),
@@ -378,7 +382,9 @@ def test_text_of_version_1_is_read_and_replays_as_version_2_does(
     scenario = oversell.naive(buyers=buyers)
     new = tracefile.loads(_text(lines))
     old = tracefile.loads(_version_1(_text(lines)))
-    assert old == new
+    # What is read says which version it was, and nothing else differs.
+    assert (old.version, new.version) == (1, 2)
+    assert old == dataclasses.replace(new, version=1)
     assert tracefile.replay(scenario, old) == explore.replay(
         scenario, old.schedule)
 
@@ -481,11 +487,11 @@ def test_line_ends_only_at_a_line_feed():
 def test_line_of_a_kind_this_version_lacks_is_refused_and_not_skipped():
     # A reader that skipped a line it does not know could replay another
     # run than the file holds and call it the same.
-    draw = '{"kind": "draw", "agent": "buyer-1", "value": true}'
+    note = '{"kind": "note", "agent": "buyer-1", "text": "skip me"}'
     with pytest.raises(
             tracefile.FormatError,
-            match='line 4 is of kind "draw", not "step"'):
-        tracefile.loads(_text(_LINES[:3] + (draw,) + _LINES[3:]))
+            match='^line 4 is of kind "note", not "step" or "draw"$'):
+        tracefile.loads(_text(_LINES[:3] + (note,) + _LINES[3:]))
 
 
 @pytest.mark.parametrize(
@@ -775,6 +781,498 @@ def test_file_holds_a_shared_list_as_it_was_at_each_call(version):
     assert [step.result for step in run.steps] == [["a"], ["a", "b"]]
     with pytest.raises(scheduler.ReplayDivergenceError, match="step 1 is "):
         tracefile.replay(_ledger(), tracefile.loads(at_end))
+
+
+# The reader's tests of draws. The counter of test_explore: b and c each
+# add 1, and a reads r and draws whether it sets the counter to r + 10. In
+# the run below a reads 0 and draws that it sets, c adds, a sets 10 and b
+# adds, so the counter ends at 11 where every way of taking turns ends at
+# 12. Line 3 is the draw, where it was made: after a's read.
+_RARELY = ((True, 1), (False, 3))
+_EVENLY = ((True, 1), (False, 1))
+_RARELY_WRITTEN = (
+    '{"$tuple": [{"$tuple": [true, 1]}, {"$tuple": [false, 3]}]}')
+_LOSES_AN_INC = ("a", "c", "a", "b")
+_COUNTING_LINES = (
+    '{"kind": "anyorder-trace", "version": 2, "scenario": "counting"}',
+    '{"kind": "step", "agent": "a", "tool": "read", "args": {}, "result": 0}',
+    '{"kind": "draw", "agent": "a", "request": ' + _RARELY_WRITTEN
+    + ', "value": true}',
+    '{"kind": "step", "agent": "c", "tool": "inc", "args": {}, '
+    '"result": null}',
+    '{"kind": "step", "agent": "a", "tool": "set", "args": {"value": 10}, '
+    '"result": null}',
+    '{"kind": "step", "agent": "b", "tool": "inc", "args": {}, '
+    '"result": null}',
+    '{"kind": "end", "violation": {"invariant": "ends-at-12", '
+    '"message": "the counter ends at 11, not 12", "step": 4}}',
+)
+
+
+class _Counter:
+    """A counter that remembers whether it was ever set."""
+
+    def __init__(self) -> None:
+        self.value = 0
+        self.was_set = False
+
+    def read(self) -> int:
+        return self.value
+
+    def inc(self) -> None:
+        self.value += 1
+
+    def set(self, value: int) -> None:
+        self.value = value
+        self.was_set = True
+
+
+def _counting(worlds: list[_Counter] | None = None) -> scheduler.Scenario:
+    """The counter and its three agents, with each world kept in worlds."""
+    def make_world() -> _Counter:
+        world = _Counter()
+        if worlds is not None:
+            worlds.append(world)
+        return world
+
+    async def setter(ctx: scheduler.AgentContext) -> None:
+        r = await ctx.call("read")
+        if await ctx.draw(_RARELY if r == 0 else _EVENLY):
+            await ctx.call("set", value=r + 10)
+
+    async def adder(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("inc")
+
+    def ends_at_12(counter: _Counter) -> str | None:
+        if counter.was_set and counter.value != 12:
+            return f"the counter ends at {counter.value}, not 12"
+        return None
+
+    return scheduler.Scenario(
+        name="counting",
+        make_world=make_world,
+        agents={"a": setter, "b": adder, "c": adder},
+        invariants=(
+            scheduler.Invariant("ends-at-12", ends_at_12, every_step=False),
+        ),
+    )
+
+
+def _counting_edited(number: int, old: str, new: str) -> str:
+    """The counter's file with one line changed, counted from 1."""
+    lines = list(_COUNTING_LINES)
+    assert old in lines[number - 1]
+    lines[number - 1] = lines[number - 1].replace(old, new)
+    return _text(lines)
+
+
+class _Given:
+    """A sampler that gives one value to whoever asks, whatever for."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def sample(self, agent: str, request: Any) -> Any:
+        return self._value
+
+
+def _asking(value: Any) -> scheduler.Scenario:
+    """One agent that draws from a value and says what it is given."""
+    async def asker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("say", value=await ctx.draw(value))
+
+    return scheduler.Scenario(
+        name="asking", make_world=_Echo, agents={"a": asker}, invariants=())
+
+
+def _asked(value: Any) -> scheduler.RunResult:
+    """The run where the agent asks to draw from a value and is given it."""
+    return scheduler.run(
+        _asking(value), scheduler.ReplayPolicy(["a"]), _Given(value))
+
+
+def _asking_file(request: str, value: str | None = None) -> str:
+    """The file of that run, with the request and the value as written."""
+    value = request if value is None else value
+    return _text((
+        '{"kind": "anyorder-trace", "version": 2, "scenario": "asking"}',
+        f'{{"kind": "draw", "agent": "a", "request": {request}, '
+        f'"value": {value}}}',
+        '{"kind": "step", "agent": "a", "tool": "say", '
+        f'"args": {{"value": {value}}}, "result": {value}}}',
+        _NO_VIOLATION,
+    ))
+
+
+# Two agents that each draw before their first call, after it and, the
+# second of them, twice at its end. Lines 2 and 3 are the draws before
+# any step, a's first as agents are started in name order. Line 5 is a's
+# draw after its call, and lines 7 and 8 are b's after the last step.
+_DRAWS_EVERYWHERE_LINES = (
+    '{"kind": "anyorder-trace", "version": 2, "scenario": "everywhere"}',
+    '{"kind": "draw", "agent": "a", "request": "start", "value": 1}',
+    '{"kind": "draw", "agent": "b", "request": "start", "value": 2}',
+    '{"kind": "step", "agent": "a", "tool": "say", "args": {"value": 1}, '
+    '"result": 1}',
+    '{"kind": "draw", "agent": "a", "request": "end", "value": 3}',
+    '{"kind": "step", "agent": "b", "tool": "say", "args": {"value": 2}, '
+    '"result": 2}',
+    '{"kind": "draw", "agent": "b", "request": "end", "value": 4}',
+    '{"kind": "draw", "agent": "b", "request": "end", "value": 5}',
+    _NO_VIOLATION,
+)
+
+
+def _draws_everywhere() -> scheduler.Scenario:
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("say", value=await ctx.draw("start"))
+        await ctx.draw("end")
+        if ctx.name == "b":
+            await ctx.draw("end")
+
+    return scheduler.Scenario(
+        name="everywhere", make_world=_Echo,
+        agents={"b": drawer, "a": drawer}, invariants=())
+
+
+def _everywhere_moved(line: int, to: int) -> str:
+    """The file above with one line moved, both counted from 1."""
+    lines = list(_DRAWS_EVERYWHERE_LINES)
+    lines.insert(to - 1, lines.pop(line - 1))
+    return _text(lines)
+
+
+def test_file_of_a_run_that_drew_replays_to_it():
+    scenario = _counting()
+    saved = tracefile.loads(_text(_COUNTING_LINES))
+    assert saved.schedule == _LOSES_AN_INC
+    run = tracefile.replay(scenario, saved)
+    assert run == explore.replay(
+        scenario, _LOSES_AN_INC, [scheduler.Drawn("a", _RARELY, True, 1)])
+    assert run.violation == scheduler.Violation(
+        "ends-at-12", "the counter ends at 11, not 12", 4)
+
+
+def test_file_holds_a_draw_as_the_file_has_it_and_where():
+    saved = tracefile.loads(_text(_COUNTING_LINES))
+    # The request is not turned back into tuples here: that is replay's
+    # to do. The step is not on the line. It is the number of step lines
+    # before it.
+    assert saved.draws == ({
+        "agent": "a",
+        "request": {"$tuple": [
+            {"$tuple": [True, 1]}, {"$tuple": [False, 3]}]},
+        "value": True,
+        "step": 1,
+    },)
+    assert type(saved.draws[0]["value"]) is bool
+    assert len(saved.steps) == 4
+
+
+def test_file_of_a_run_that_drew_nothing_holds_no_draw():
+    assert tracefile.loads(_text(_LINES)).draws == ()
+
+
+def test_file_says_which_version_it_is():
+    assert tracefile.loads(_text(_LINES)).version == 2
+    assert tracefile.loads(_version_1(_text(_LINES))).version == 1
+    # A record built by hand is of the version that is written.
+    assert tracefile.Saved("echo", (), None).version == tracefile.VERSION == 2
+
+
+def test_file_holds_each_draw_where_it_was_made():
+    scenario = _draws_everywhere()
+    saved = tracefile.loads(_text(_DRAWS_EVERYWHERE_LINES))
+    assert [(draw["agent"], draw["step"]) for draw in saved.draws] == [
+        ("a", 0), ("b", 0), ("a", 1), ("b", 2), ("b", 2)]
+    assert saved.schedule == ("a", "b")
+    run = tracefile.replay(scenario, saved)
+    assert run.draws == (
+        scheduler.Drawn("a", "start", 1, 0),
+        scheduler.Drawn("b", "start", 2, 0),
+        scheduler.Drawn("a", "end", 3, 1),
+        scheduler.Drawn("b", "end", 4, 2),
+        scheduler.Drawn("b", "end", 5, 2),
+    )
+
+
+_DRAWN_ELSEWHERE = [
+    # b's first draw, put after a's call: b draws before any step. The
+    # draws are still in the order they are made, so each is given back,
+    # and the run is over before the place is seen to be another.
+    (_everywhere_moved(3, 4), "draw 2 was made after 0 steps, not after 1"),
+    # And put after a's second draw, where it is no longer b's turn.
+    (_everywhere_moved(3, 5), "draw 2 names 'a', but it is 'b' that draws"),
+    # a's draw after its call, put before the call and after b's.
+    (_everywhere_moved(5, 4), "draw 3 was made after 1 steps, not after 0"),
+    (_everywhere_moved(5, 6), "draw 3 was made after 1 steps, not after 2"),
+    # The two draws before any step, swapped.
+    (_everywhere_moved(2, 3), "draw 1 names 'b', but it is 'a' that draws"),
+    # b's last draw, left out and given twice.
+    (_text(_DRAWS_EVERYWHERE_LINES[:7] + _DRAWS_EVERYWHERE_LINES[8:]),
+     "the draws end after 4 but agent 'b' asks for one more"),
+    (_text(_DRAWS_EVERYWHERE_LINES[:8] + _DRAWS_EVERYWHERE_LINES[7:]),
+     "the run made 5 draws but 6 were given"),
+]
+
+
+@pytest.mark.parametrize(
+    "text,message",
+    _DRAWN_ELSEWHERE,
+    ids=[message for _, message in _DRAWN_ELSEWHERE])
+def test_file_with_a_draw_in_another_place_is_refused(text, message):
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        tracefile.replay(_draws_everywhere(), tracefile.loads(text))
+    assert str(caught.value) == message
+
+
+_NOT_A_FILE_WITH_DRAWS = [
+    (_counting_edited(3, ', "value": true', ""),
+     "line 3 holds the keys agent, kind, request, not agent, kind, request, "
+     "value$"),
+    (_counting_edited(3, '"request": ' + _RARELY_WRITTEN + ", ", ""),
+     "line 3 holds the keys agent, kind, value, not agent, kind, request, "
+     "value$"),
+    (_counting_edited(3, '"value": true', '"value": true, "hash": "ab"'),
+     "line 3 holds the keys agent, hash, kind, request, value, not agent, "
+     "kind, request, value$"),
+    (_counting_edited(3, '"value": true', '"value": true, "step": 1'),
+     "line 3 holds the keys agent, kind, request, step, value, not "),
+    (_counting_edited(3, '"agent": "a"', '"agent": 7'),
+     "line 3 holds 7 as its agent, which is not a string$"),
+    (_counting_edited(3, '"value": true', '"value": NaN'),
+     "line 3 cannot be read: NaN is not a finite number$"),
+    (_counting_edited(
+        3, '"value": true', '"value": true, "value": false'),
+     "line 3 cannot be read: an object gives the key 'value' twice$"),
+    # The line is one level and the lists are 100 more.
+    (_counting_edited(
+        3, '"value": true', f'"value": {"[" * 100}{"]" * 100}'),
+     "line 3 is nested deeper than 100 levels$"),
+    # A draw is a line of version 2. Version 1 has none, and a reader
+    # that skipped one would replay another run and call it the same.
+    (_counting_edited(1, '"version": 2', '"version": 1'),
+     'line 3 is of kind "draw", not "step"$'),
+    (_counting_edited(3, '"kind": "draw"', '"kind": "note"'),
+     'line 3 is of kind "note", not "step" or "draw"$'),
+    (_counting_edited(3, '"kind": "draw", ', ""),
+     'line 3 is of kind null, not "step" or "draw"$'),
+    (_counting_edited(3, '"kind": "draw"', '"kind": ["draw"]'),
+     r'line 3 is of kind \["draw"\], not "step" or "draw"$'),
+    # A step line called a draw, and a draw line called a step.
+    (_counting_edited(2, '"kind": "step"', '"kind": "draw"'),
+     "line 2 holds the keys agent, args, kind, result, tool, not agent, "
+     "kind, request, value$"),
+    (_counting_edited(3, '"kind": "draw"', '"kind": "step"'),
+     "line 3 holds the keys agent, kind, request, value, not agent, args, "
+     "kind, result, tool$"),
+    (_text(_COUNTING_LINES[:3]), 'line 3 is of kind "draw", not "end"$'),
+    (_text(_COUNTING_LINES + _COUNTING_LINES[2:3]),
+     'line 7 is of kind "end", not "step" or "draw"$'),
+]
+
+
+@pytest.mark.parametrize(
+    "text,message",
+    _NOT_A_FILE_WITH_DRAWS,
+    ids=[message for _, message in _NOT_A_FILE_WITH_DRAWS])
+def test_text_with_a_draw_that_is_not_a_trace_file_is_refused(text, message):
+    with pytest.raises(tracefile.FormatError, match=message):
+        tracefile.loads(text)
+
+
+_ANOTHER_DRAW = [
+    # With the other draw a stops after its read.
+    (_counting_edited(3, '"value": true', '"value": false'),
+     "step 3 names 'a', which is not waiting; waiting: b"),
+    (_text(_COUNTING_LINES[:2] + _COUNTING_LINES[3:]),
+     "the draws end after 0 but agent 'a' asks for one more"),
+    (_text(_COUNTING_LINES[:3] + _COUNTING_LINES[2:]),
+     "the run made 1 draws but 2 were given"),
+    (_counting_edited(3, '"agent": "a"', '"agent": "b"'),
+     "draw 1 names 'b', but it is 'a' that draws"),
+    (_counting_edited(3, "[false, 3]", "[false, 4]"),
+     "draw 1 is from ((True, 1), (False, 4)), but agent 'a' asks to draw "
+     "from ((True, 1), (False, 3))"),
+    # Lists where the agent gives tuples.
+    (_counting_edited(
+        3, _RARELY_WRITTEN, "[[true, 1], [false, 3]]"),
+     "draw 1 is from [[True, 1], [False, 3]], but agent 'a' asks to draw "
+     "from ((True, 1), (False, 3))"),
+    # The draw one line early: a draws once its read has returned.
+    (_text(
+        _COUNTING_LINES[:1] + (_COUNTING_LINES[2], _COUNTING_LINES[1])
+        + _COUNTING_LINES[3:]),
+     "draw 1 was made after 1 steps, not after 0"),
+]
+
+
+@pytest.mark.parametrize(
+    "text,message",
+    _ANOTHER_DRAW,
+    ids=[message[:40] for _, message in _ANOTHER_DRAW])
+def test_file_whose_draws_give_another_run_is_refused(text, message):
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        tracefile.replay(_counting(), tracefile.loads(text))
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        # 1 for True and 0 for False: equal as Python compares, so the
+        # sampler gives the draw back, and not what the agent asked for.
+        '{"$tuple": [{"$tuple": [1, 1]}, {"$tuple": [0, 3]}]}',
+        '{"$tuple": [{"$tuple": [true, 1.0]}, {"$tuple": [false, 3]}]}',
+        '{"$tuple": [{"$tuple": [true, true]}, {"$tuple": [false, 3]}]}',
+    ])
+def test_file_with_a_request_python_takes_for_equal_is_refused(held):
+    saved = tracefile.loads(_counting_edited(3, _RARELY_WRITTEN, held))
+    with pytest.raises(
+            scheduler.ReplayDivergenceError, match="^draw 1 is {.* in the "
+                                                   "file and {.* in the run$"):
+        tracefile.replay(_counting(), saved)
+
+
+@pytest.mark.parametrize(
+    "value,written", _VALUES, ids=[written for _, written in _VALUES])
+def test_draw_is_given_back_as_the_value_its_text_stands_for(value, written):
+    # The agent says what it is given, and the step that says it is held
+    # against the file as text. So the replay passes only if the agent
+    # was given the very value, a tuple for a tuple and True for true.
+    saved = tracefile.loads(_asking_file(written))
+    assert tracefile.replay(_asking(value), saved) == _asked(value)
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        '{"$set": [1]}',
+        '{"$tuple": 5}',
+        '{"$tuple": {"a": 1}}',
+        '{"$tuple": [1], "more": 2}',
+        '{"$tuple": [1], "$raised": {"kind": "K", "message": "m"}}',
+        '{"$raised": "K"}',
+        '{"$raised": {"kind": "K"}}',
+        '{"$raised": {"kind": "K", "message": "m", "more": 1}}',
+        '{"$raised": ["K", "m"]}',
+        '{"$raised": ["kind", "message"]}',
+        '{"$": 1}',
+        '{"$x": 1, "y": 2}',
+        '[1, {"$set": []}]',
+        '{"a": {"$tuple": [{"$set": []}]}}',
+        '{"$raised": {"kind": {"$set": []}, "message": "m"}}',
+    ])
+@pytest.mark.parametrize("part", ["request", "value"])
+def test_draw_whose_text_stands_for_no_value_is_refused(held, part):
+    worlds: list[_Counter] = []
+    old = _RARELY_WRITTEN if part == "request" else "true"
+    saved = tracefile.loads(
+        _counting_edited(3, f'"{part}": {old}', f'"{part}": {held}'))
+    # Read, as a step with such a value is, and refused by the replay.
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        tracefile.replay(_counting(worlds), saved)
+    assert str(caught.value).startswith(f"draw 1: its {part} holds ")
+    assert str(caught.value).endswith(", which is the text of no value")
+    # Before anything ran: there is nothing to give the agent.
+    assert not worlds
+
+
+def test_refusal_of_a_draw_names_the_part_that_stands_for_no_value():
+    saved = tracefile.loads(_counting_edited(
+        3, '"value": true', '"value": [1, {"$set": [2]}]'))
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        tracefile.replay(_counting(), saved)
+    assert str(caught.value) == (
+        'draw 1: its value holds {"$set": [2]}, which is the text of no '
+        "value")
+
+
+@pytest.mark.parametrize("lists,fits", [(99, True), (100, False)])
+def test_draw_is_read_as_deep_as_a_line_may_be(lists, fits):
+    # The line is one level, and neither the request nor the value is
+    # inside args: 99 lists make 100.
+    value: Any = []
+    for _ in range(lists - 1):
+        value = [value]
+    written = "[" * lists + "]" * lists
+    request = _text((
+        '{"kind": "anyorder-trace", "version": 2, "scenario": "asking"}',
+        f'{{"kind": "draw", "agent": "a", "request": {written}, '
+        '"value": 1}',
+        '{"kind": "step", "agent": "a", "tool": "say", '
+        '"args": {"value": 1}, "result": 1}',
+        _NO_VIOLATION,
+    ))
+    drawn = _text((
+        '{"kind": "anyorder-trace", "version": 2, "scenario": "drawn-deep"}',
+        f'{{"kind": "draw", "agent": "a", "request": 1, "value": {written}}}',
+        _NO_VIOLATION,
+    ))
+
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw(1)
+
+    drawing = scheduler.Scenario(
+        name="drawn-deep", make_world=_Echo, agents={"a": drawer},
+        invariants=())
+    if fits:
+        run = tracefile.replay(_asking(value), tracefile.loads(request))
+        assert run.draws == (scheduler.Drawn("a", value, 1, 0),)
+        run = tracefile.replay(drawing, tracefile.loads(drawn))
+        assert run.draws == (scheduler.Drawn("a", 1, value, 0),)
+    else:
+        for text in (request, drawn):
+            with pytest.raises(
+                    tracefile.FormatError,
+                    match="line 2 is nested deeper than 100 levels"):
+                tracefile.loads(text)
+
+
+def test_draw_with_a_surrogate_is_given_back_and_is_not_the_draw_of_a_file():
+    # Escaped, a lone surrogate is read. A call carries the string, so the
+    # agent is given it, and the run that comes of it is one that no file
+    # holds: it cannot be the run this file holds.
+    lone = chr(0xD83D)
+    saved = tracefile.loads(_asking_file('"coin"', '"' + chr(92) + 'ud83d"'))
+    assert saved.draws[0]["value"] == lone
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        tracefile.replay(_asking("coin"), saved)
+    assert str(caught.value).endswith(
+        "a trace file does not hold '\\ud83d', a string with a surrogate")
+
+
+def test_file_may_hold_a_draw_that_no_sampler_would_give():
+    # Nothing here knows what a request stands for, so a replay gives a
+    # draw back as the file holds it. 1 is no outcome of what a asks to
+    # draw from. It is true enough for a to set, and the run that comes
+    # of it holds the 1 as the file does.
+    saved = tracefile.loads(
+        _counting_edited(3, '"value": true', '"value": 1'))
+    run = tracefile.replay(_counting(), saved)
+    assert run.draws == (scheduler.Drawn("a", _RARELY, 1, 1),)
+    assert type(run.draws[0].value) is int
+    assert run.violation is not None
+
+
+def test_scenario_that_draws_nothing_does_not_replay_a_file_with_a_draw():
+    draw = '{"kind": "draw", "agent": "buyer-1", "request": 1, "value": 1}'
+    saved = tracefile.loads(_text(_LINES[:3] + (draw,) + _LINES[3:]))
+    assert saved.schedule == _SHRUNK
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the run made 0 draws but 1 were given$"):
+        tracefile.replay(oversell.naive(), saved)
+
+
+def test_text_of_version_1_is_read_with_no_draw_line():
+    # A well-formed draw line, in a text that says it is of version 1.
+    draw = '{"kind": "draw", "agent": "buyer-1", "request": 1, "value": 1}'
+    text = _version_1(_text(_LINES[:3] + (draw,) + _LINES[3:]))
+    with pytest.raises(
+            tracefile.FormatError,
+            match='^line 4 is of kind "draw", not "step"$'):
+        tracefile.loads(text)
 
 
 class _Colour(enum.IntEnum):
@@ -1212,3 +1710,217 @@ def test_run_of_another_scenario_is_not_written():
         tracefile.dumps(oversell.naive(buyers=3), run)
     with pytest.raises(scheduler.ReplayDivergenceError, match="step 1 is "):
         tracefile.dumps(oversell.naive(stock=2), run)
+
+
+# The writer's tests of draws.
+
+
+class _Counted:
+    """A sampler that gives 1, 2, 3 and so on."""
+
+    def __init__(self) -> None:
+        self._numbers = itertools.count(1)
+
+    def sample(self, agent: str, request: Any) -> int:
+        return next(self._numbers)
+
+
+def _drew(
+    request: Any, value: Any, *, agent: Any = "a", step: Any = 0
+) -> scheduler.RunResult:
+    """A run of one step and one draw, put together by hand.
+
+    The scheduler makes no run with a draw that no call carries, and the
+    writer must still refuse to write one.
+    """
+    return scheduler.RunResult(
+        (scheduler.Step("a", "say", {"value": 1}, 1),), None,
+        (scheduler.Drawn(agent, request, value, step),))
+
+
+def test_run_that_drew_is_written_as_the_file_above():
+    scenario = _counting()
+    run = explore.replay(
+        scenario, _LOSES_AN_INC, [scheduler.Drawn("a", _RARELY, True, 1)])
+    assert tracefile.dumps(scenario, run) == _text(_COUNTING_LINES)
+
+
+def test_draws_are_written_before_between_and_after_the_steps():
+    scenario = _draws_everywhere()
+    run = scheduler.run(
+        scenario, scheduler.ReplayPolicy(["a", "b"]), _Counted())
+    assert tracefile.dumps(scenario, run) == _text(_DRAWS_EVERYWHERE_LINES)
+
+
+@pytest.mark.parametrize(
+    "value,written", _VALUES, ids=[written for _, written in _VALUES])
+def test_draw_is_written_as_the_rules_give(value, written):
+    assert tracefile.dumps(_asking(value), _asked(value)) == _asking_file(
+        written)
+
+
+def test_every_run_of_a_search_that_draws_reads_back_and_replays():
+    scenario = _counting()
+    set_by_a = 0
+    for seed in range(300):
+        run = scheduler.run(
+            scenario, scheduler.RandomPolicy(seed),
+            scheduler.SeededSampler(seed))
+        saved = tracefile.loads(tracefile.dumps(scenario, run))
+        # a draws once in every run, after its read.
+        assert len(saved.draws) == len(run.draws) == 1
+        assert tracefile.replay(scenario, saved) == run
+        set_by_a += run.draws[0].value
+    # Both sides of the draw were written and given back.
+    assert 0 < set_by_a < 300
+
+
+@pytest.mark.parametrize("value,kind", _NOT_HELD)
+@pytest.mark.parametrize("part", ["request", "value"])
+def test_draw_the_file_cannot_hold_is_not_written(value, kind, part):
+    run = _drew(value, 1) if part == "request" else _drew(1, value)
+    with pytest.raises(
+            TypeError,
+            match=f"^draw 1: a trace file does not hold .*, of type {kind}$"):
+        tracefile.dumps(_asking(1), run)
+
+
+@pytest.mark.parametrize("value,kind", _NOT_HELD)
+@pytest.mark.parametrize("part", ["request", "value"])
+def test_draw_the_file_cannot_hold_is_not_made(value, kind, part):
+    # No call carries any of these either, so the run ends at the draw.
+    asked, given = (value, 1) if part == "request" else (1, value)
+    with pytest.raises(
+            scheduler.UnsupportedValueError,
+            match=f"a call does not carry .*, of type {kind}$"):
+        scheduler.run(
+            _asking(asked), scheduler.ReplayPolicy(["a"]), _Given(given))
+
+
+@pytest.mark.parametrize("part", ["request", "value"])
+def test_draw_with_a_surrogate_is_not_written(part):
+    lone = chr(0xD83D)
+    run = _drew(lone, 1) if part == "request" else _drew(1, lone)
+    with pytest.raises(
+            TypeError,
+            match="^draw 1: a trace file does not hold .*, a string with a "
+                  "surrogate$"):
+        tracefile.dumps(_asking(1), run)
+
+
+def test_draw_of_an_agent_whose_name_is_no_string_is_not_written():
+    with pytest.raises(
+            TypeError,
+            match="^draw 1: a trace file does not hold 7, of type int, as "
+                  "the agent's name$"):
+        tracefile.dumps(_asking(1), _drew(1, 1, agent=7))
+
+
+@pytest.mark.parametrize("part", ["request", "value"])
+def test_draw_is_written_as_deep_as_a_line_may_be_and_no_deeper(part):
+    # The line is one level, which leaves 99 to a request and to a value.
+    def run(levels: int) -> scheduler.RunResult:
+        deep = _nested(lambda value: [value], levels)
+        return _drew(deep, 1) if part == "request" else _drew(1, deep)
+
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw(run(99).draws[0].request)
+        await ctx.call("say", value=1)
+
+    scenario = scheduler.Scenario(
+        name="deep", make_world=_Echo, agents={"a": drawer}, invariants=())
+    made = scheduler.run(
+        scenario, scheduler.ReplayPolicy(["a"]),
+        _Given(run(99).draws[0].value))
+    assert made == run(99)
+    saved = tracefile.loads(tracefile.dumps(scenario, made))
+    assert tracefile.replay(scenario, saved) == made
+    with pytest.raises(
+            TypeError,
+            match="^draw 1: a trace file does not hold a value nested so "
+                  "deep: a line has at most 100 levels of lists and "
+                  "objects$"):
+        tracefile.dumps(scenario, run(100))
+
+
+@pytest.mark.parametrize(
+    "steps,message",
+    [
+        ((-1,), "draw 1: a trace file does not hold a draw made after -1 "
+                "steps, here only after 0 to 1"),
+        ((2,), "draw 1: a trace file does not hold a draw made after 2 "
+               "steps, here only after 0 to 1"),
+        # After the draw before it or with it, and never before.
+        ((1, 0), "draw 2: a trace file does not hold a draw made after 0 "
+                 "steps, here only after 1 to 1"),
+        ((True,), "draw 1: a trace file does not hold True, of type bool, "
+                  "as the steps before a draw"),
+        ((0.0,), "draw 1: a trace file does not hold 0.0, of type float, "
+                 "as the steps before a draw"),
+        (("0",), "draw 1: a trace file does not hold '0', of type str, as "
+                 "the steps before a draw"),
+    ],
+    ids=["negative", "past-the-end", "before-the-last", "bool", "float",
+         "string"])
+def test_draw_that_is_out_of_place_is_not_written(steps, message):
+    # A run the scheduler makes has its draws in the order they were made.
+    # One put together otherwise has no place for each of its draws in a
+    # file, and is not written as the nearest run that has.
+    run = scheduler.RunResult(
+        (scheduler.Step("a", "say", {"value": 1}, 1),), None,
+        tuple(scheduler.Drawn("a", 1, 1, step) for step in steps))
+    with pytest.raises(TypeError) as caught:
+        tracefile.dumps(_asking(1), run)
+    assert str(caught.value) == message
+
+
+def test_run_whose_draws_do_not_replay_is_not_written():
+    tickets = itertools.count()
+
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        # What it draws from outlives the run.
+        await ctx.draw(next(tickets))
+
+    scenario = scheduler.Scenario(
+        name="leaky-draw", make_world=_Echo, agents={"a": drawer},
+        invariants=())
+    run = scheduler.run(scenario, scheduler.ReplayPolicy([]), _Given("x"))
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^draw 1 is from 0, but agent 'a' asks to draw from 1$"):
+        tracefile.dumps(scenario, run)
+
+
+def test_run_with_a_draw_its_scenario_does_not_make_is_not_written():
+    run = dataclasses.replace(
+        _said(1), draws=(scheduler.Drawn("a", 1, 1, 0),))
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the run made 0 draws but 1 were given$"):
+        tracefile.dumps(_echo(1), run)
+
+
+@pytest.mark.skipif(
+    not getattr(sys, "get_int_max_str_digits", lambda: 0)(),
+    reason="this Python writes an integer of any length")
+@pytest.mark.parametrize("part", ["request", "value"])
+def test_integer_too_long_for_json_is_not_written_in_a_draw(part):
+    value = 10 ** sys.get_int_max_str_digits()
+    run = _drew(value, 1) if part == "request" else _drew(1, value)
+    # As in a step: refused where the draw is written, so that the error
+    # names it.
+    with pytest.raises(TypeError, match="^draw 1: "):
+        tracefile.dumps(_asking(1), run)
+
+
+@pytest.mark.skipif(
+    not hasattr(sys, "set_int_max_str_digits"),
+    reason="this Python writes an integer of any length")
+def test_integer_json_writes_and_cannot_read_is_not_written_in_a_draw():
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(20000)
+    try:
+        with pytest.raises(TypeError, match="^draw 1: Exceeds the limit"):
+            tracefile.dumps(_asking(1), _drew(1, 10 ** 20000))
+    finally:
+        sys.set_int_max_str_digits(limit)

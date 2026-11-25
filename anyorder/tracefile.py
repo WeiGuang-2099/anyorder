@@ -7,6 +7,11 @@ A trace file is JSON lines, each an object with a kind:
 * One line of kind "step" follows for each tool call, in the order they
   ran. Its agent, tool and args are the schedule entry, and its result is
   what the call returned.
+* One line of kind "draw" stands for each draw, where it was made: after
+  the line of the step it followed, or before the first step line. It
+  holds the agent that drew, the request it asked to draw from and the
+  value it was given. A file says when a draw was made by where its line
+  stands, and in no other way.
 * The last line is of kind "end" and holds the first violation, or null.
   A file without it was cut short.
 
@@ -22,24 +27,29 @@ objects, so that what a file holds does not depend on how deep the Python
 that reads it can go.
 
 A file is a claim about a run, and replay checks the claim: it runs the
-schedule the file holds, writes the run it gets and refuses the file unless
-every step and the violation are written as the file holds them. What is
-compared is what the lines hold as JSON, with an integer kept apart from a
-float. Spacing, the order of an object's keys and the spelling of a number
-or a string are not part of that: 1.00 holds the float 1.0, and not the
-integer 1, and a number with more digits than a float keeps holds the
-float nearest to it. Nothing is turned back into a value of a run, so the
-only way from a file to a run is to replay it.
+schedule the file holds, gives each draw the file holds back to the agent
+that made it, writes the run it gets and refuses the file unless every
+step, every draw and the violation are written as the file holds them.
+What is compared is what the lines hold as JSON, with an integer kept apart
+from a float. Spacing, the order of an object's keys and the spelling of a
+number or a string are not part of that: 1.00 holds the float 1.0, and not
+the integer 1, and a number with more digits than a float keeps holds the
+float nearest to it. A draw is turned back into values of a run, because
+its agent must be given what it drew. Nothing else is, so the only way from
+a file to a run is to replay it. A draw is given back as the file holds it:
+nothing here knows what a request stands for, so a replay does not ask
+whether a sampler could have given that value.
 
-The values are those of the calls, as the scheduler takes them: an argument
-as its agent gave it when it awaited the call, and a result as its tool
-returned it. That is what version 2 says, and the writer writes version 2.
-Version 1 said less. Its values were those the trace held when the run
-ended, and a trace then kept a value by reference, so one that was changed
-after its call was written with its final content. A text of version 1 is
-still read, as a text of version 2 is. It replays where its run did not
-rest on a value being shared: none was changed after its call, and neither
-an agent nor a tool went by a list or a dict that the other still held.
+The values are those of the calls and the draws, as the scheduler takes
+them: an argument as its agent gave it when it awaited the call, and a
+result as its tool returned it. That is what version 2 says, and the writer
+writes version 2. Version 1 said less. Its values were those the trace held
+when the run ended, and a trace then kept a value by reference, so one that
+was changed after its call was written with its final content. And it has
+no draw line: a text of version 1 that holds one is refused. A text of
+version 1 is still read. It replays where its run did not rest on a value
+being shared: none was changed after its call, and neither an agent nor a
+tool went by a list or a dict that the other still held.
 
 Nothing here opens a file. The caller reads and writes the text.
 """
@@ -49,7 +59,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from anyorder import explore
@@ -58,15 +68,18 @@ from anyorder import values
 
 VERSION = 2
 
-# The versions this reader knows. Their lines are the same, and what they
-# say of a value is not.
-_VERSIONS = (1, VERSION)
+# The versions this reader knows, each with the kinds of line it has
+# between its first and its last. Version 1 has no draw, and says less of
+# a value.
+_KINDS = {1: ("step",), VERSION: ("step", "draw")}
+_VERSIONS = tuple(_KINDS)
 
 # The scheduler takes no value nested deeper than a line lets a result be,
 # and the line is one level itself.
 _MAX_DEPTH = values.ROOM + 1
 _OPENING = "anyorder-trace"
 _STEP = {"agent": str, "tool": str, "args": dict, "result": object}
+_DRAW = {"agent": str, "request": object, "value": object}
 _VIOLATION = {"invariant": str, "message": str, "step": int}
 _JSON_NAMES = {str: "a string", int: "an integer", dict: "an object"}
 
@@ -87,11 +100,17 @@ class Saved:
         steps: The agent, tool, args and result of each step, in order.
         violation: The invariant, message and step of the first violation,
             or None.
+        version: The version the file says it is of.
+        draws: The agent, request and value of each draw, in order. Each
+            also has a step, which is on no line: it is the number of step
+            lines the file has before the draw's.
     """
 
     scenario: str
     steps: tuple[Mapping[str, Any], ...]
     violation: Mapping[str, Any] | None
+    version: int = VERSION
+    draws: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def schedule(self) -> tuple[str, ...]:
@@ -112,22 +131,23 @@ def dumps(scenario: scheduler.Scenario, result: scheduler.RunResult) -> str:
         result: The run to write. It need not have broken an invariant.
 
     Raises:
-        TypeError: The run is not written: an argument or a result is of
-            a type a file does not hold, is nested too deep or holds an
-            integer too long for this Python to write, a name or a
-            message is not a string, or a string in the run holds a
-            surrogate. Nothing is written as the nearest thing a file
-            holds.
+        TypeError: The run is not written: an argument or a result, or
+            what a draw asked for or was given, is of a type a file does
+            not hold, is nested too deep or holds an integer too long for
+            this Python to write, a name or a message is not a string, a
+            string in the run holds a surrogate, or a draw is out of
+            place among the others. Nothing is written as the nearest
+            thing a file holds.
         ReplayDivergenceError: The text did not replay to the same trace.
     """
-    steps, violation = _written(result)
+    steps, draws, violation = _written(result)
     records = [
         {
             "kind": _OPENING,
             "version": VERSION,
             "scenario": _string("the scenario's name", scenario.name),
         },
-        *({"kind": "step", **step} for step in steps),
+        *_lines(steps, draws),
         {"kind": "end", "violation": violation},
     ]
     text = "".join(f"{json.dumps(record)}\n" for record in records)
@@ -158,15 +178,23 @@ def loads(text: str) -> Saved:
     if not lines:
         raise FormatError("the text is empty")
     # First, and alone: what the other lines may hold depends on it.
-    scenario = _opening(_parse(1, lines[0]))
+    version, scenario = _opening(_parse(1, lines[0]))
     records = [
         _parse(number, line) for number, line in enumerate(lines[1:], start=2)]
     if not records:
         raise FormatError("the file has no end line")
-    steps = tuple(
-        _step(number, record)
-        for number, record in enumerate(records[:-1], start=2))
-    return Saved(scenario, steps, _end(len(lines), records[-1]))
+    steps: list[dict[str, Any]] = []
+    draws: list[dict[str, Any]] = []
+    for number, record in enumerate(records[:-1], start=2):
+        if _expect_kind(number, record, *_KINDS[version]) == "step":
+            steps.append(_fields(number, record, _STEP))
+        else:
+            # Where its line stands is all a file says of when it was made.
+            draws.append(
+                {**_fields(number, record, _DRAW), "step": len(steps)})
+    return Saved(
+        scenario, tuple(steps), _end(len(lines), records[-1]), version,
+        tuple(draws))
 
 
 def replay(
@@ -174,8 +202,9 @@ def replay(
 ) -> scheduler.RunResult:
     """Runs the schedule a trace file holds and checks the run against it.
 
-    The run is checked once it is over, so a scenario that is not the
-    file's can make every call of the schedule before it is refused.
+    Each draw the file holds is given back to the agent that made it. The
+    run is checked once it is over, so a scenario that is not the file's
+    can make every call of the schedule before it is refused.
 
     Args:
         scenario: What to run. A file names its scenario and not what the
@@ -188,8 +217,10 @@ def replay(
     Raises:
         ValueError: The file holds a run of a scenario with another name.
             Nothing has run.
-        ReplayDivergenceError: The run left the file's schedule, or a step
-            or the violation is not written as the file holds it.
+        ReplayDivergenceError: The run left the file's schedule or its
+            draws, or a step, a draw or the violation is not written as
+            the file holds it. Or a draw holds the text of no value, and
+            then nothing has run.
         UnsupportedValueError: The scenario makes a call with a value no
             call carries, under this schedule. That ends its run, so
             there is none to hold against the file.
@@ -198,17 +229,43 @@ def replay(
         raise ValueError(
             f"the file holds a run of {saved.scenario!r}, not of "
             f"{scenario.name!r}")
-    result = explore.replay(scenario, saved.schedule)
+    result = explore.replay(scenario, saved.schedule, _given_back(saved.draws))
     try:
-        steps, violation = _written(result)
+        steps, draws, violation = _written(result)
     except TypeError as error:
         # A run that no file holds is not the run this file holds.
         raise scheduler.ReplayDivergenceError(str(error)) from None
-    # As many steps on both sides: explore.replay refuses any other run.
+    # As many steps and as many draws on both sides: explore.replay refuses
+    # any other run.
     for number, (held, ran) in enumerate(zip(saved.steps, steps), start=1):
         _compare(f"step {number}", held, ran)
+    for number, (held, ran) in enumerate(zip(saved.draws, draws), start=1):
+        # The sampler held the request against what the agent asked for as
+        # Python compares, which takes True for 1.
+        _compare(f"draw {number}", held, ran)
     _compare("the violation", saved.violation, violation)
     return result
+
+
+def _given_back(draws: Sequence[Mapping[str, Any]]) -> list[scheduler.Drawn]:
+    """Returns the draws of a file as a run holds them.
+
+    Raises:
+        ReplayDivergenceError: What a draw asked for or was given is the
+            text of no value, so no run made the draw.
+    """
+    given = []
+    for number, draw in enumerate(draws, start=1):
+        parts = {}
+        for part in ("request", "value"):
+            try:
+                parts[part] = _decode(draw[part])
+            except ValueError as error:
+                raise scheduler.ReplayDivergenceError(
+                    f"draw {number}: its {part} holds {error}") from None
+        given.append(scheduler.Drawn(
+            draw["agent"], parts["request"], parts["value"], draw["step"]))
+    return given
 
 
 def _compare(what: str, held: Any, ran: Any) -> None:
@@ -229,15 +286,21 @@ def _in_one_order(value: Any) -> str:
 
 def _written(
     result: scheduler.RunResult,
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Returns a run's steps and its violation as a file holds them.
+) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None
+]:
+    """Returns a run's steps, its draws and its violation as a file holds them.
+
+    A draw is returned as Saved holds one, with the number of steps
+    before it.
 
     Raises:
-        TypeError: The run is not written: an argument or a result is of
-            a type a file does not hold, is nested too deep or holds an
-            integer too long for this Python to write, a name or a
-            message is not a string, or a string in the run holds a
-            surrogate.
+        TypeError: The run is not written: an argument or a result, or
+            what a draw asked for or was given, is of a type a file does
+            not hold, is nested too deep or holds an integer too long for
+            this Python to write, a name or a message is not a string, a
+            string in the run holds a surrogate, or a draw is out of
+            place among the others.
     """
     steps = []
     for number, step in enumerate(result.steps, start=1):
@@ -245,10 +308,18 @@ def _written(
             steps.append(_written_step(step))
         except (TypeError, ValueError) as error:
             raise TypeError(f"step {number}: {error}") from None
+    draws = []
+    earliest = 0
+    for number, draw in enumerate(result.draws, start=1):
+        try:
+            draws.append(_written_draw(draw, earliest, len(steps)))
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"draw {number}: {error}") from None
+        earliest = draw.step
     violation = result.violation
     if violation is None:
-        return steps, None
-    return steps, {
+        return steps, draws, None
+    return steps, draws, {
         "invariant": _string("the invariant's name", violation.invariant),
         "message": _string("the violation's message", violation.message),
         "step": violation.step,
@@ -268,6 +339,100 @@ def _written_step(step: scheduler.Step) -> dict[str, Any]:
     # step.
     json.loads(json.dumps(held))
     return held
+
+
+def _written_draw(
+    draw: scheduler.Drawn, earliest: int, latest: int
+) -> dict[str, Any]:
+    """Returns a draw as a file holds it, with the steps before it.
+
+    Args:
+        draw: The draw.
+        earliest: The steps before the draw that was made before this one.
+        latest: The steps of the run.
+
+    Raises:
+        TypeError: The draw is not written.
+    """
+    held = {
+        "agent": _string("the agent's name", draw.agent),
+        "request": _encode(draw.request, _MAX_DEPTH - 1),
+        "value": _encode(draw.value, _MAX_DEPTH - 1),
+    }
+    # As for a step: the error names the draw.
+    json.loads(json.dumps(held))
+    if type(draw.step) is not int:
+        raise TypeError(
+            f"a trace file does not hold {_shown(draw.step)}, of type "
+            f"{type(draw.step).__name__}, as the steps before a draw")
+    if not earliest <= draw.step <= latest:
+        # A file says when a draw was made by where its line stands, and
+        # the lines of the draws are in the order of the draws. Put where
+        # it does fit, this one would be the draw of another run.
+        raise TypeError(
+            f"a trace file does not hold a draw made after {draw.step} "
+            f"steps, here only after {earliest} to {latest}")
+    return {**held, "step": draw.step}
+
+
+def _lines(
+    steps: Sequence[Mapping[str, Any]], draws: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Returns the step and draw lines of a file, each draw where it was made.
+
+    Args:
+        steps: The steps as _written gives them.
+        draws: The draws as _written gives them: in the order they were
+            made, each with the steps before it, and none out of place.
+    """
+    made: list[list[dict[str, Any]]] = [[] for _ in range(len(steps) + 1)]
+    for draw in draws:
+        made[draw["step"]].append(
+            {"kind": "draw", **{key: draw[key] for key in _DRAW}})
+    lines: list[dict[str, Any]] = []
+    for before, step in enumerate(steps):
+        lines += made[before]
+        lines.append({"kind": "step", **step})
+    return lines + made[len(steps)]
+
+
+def _decode(held: Any) -> Any:
+    """Returns the value that a JSON value of a file stands for.
+
+    The way back from _encode, for what _encode writes and nothing else.
+
+    Raises:
+        ValueError: No value is written so. An object has a key that
+            starts with one "$", and it is neither a tuple nor an error
+            as they are written.
+    """
+    kind = type(held)
+    if kind is list:
+        return [_decode(part) for part in held]
+    if kind is not dict:
+        return held
+    if not any(_is_tag(key) for key in held):
+        # One "$" less: the writer gave such a key one more.
+        return {
+            key[1:] if key.startswith("$") else key: _decode(part)
+            for key, part in held.items()}
+    if list(held) == ["$tuple"] and type(held["$tuple"]) is list:
+        return tuple(_decode(part) for part in held["$tuple"])
+    if list(held) == ["$raised"]:
+        error = held["$raised"]
+        if type(error) is dict and sorted(error) == ["kind", "message"]:
+            return scheduler.Raised(
+                _decode(error["kind"]), _decode(error["message"]))
+    raise ValueError(f"{json.dumps(held)}, which is the text of no value")
+
+
+def _is_tag(key: str) -> bool:
+    """Says whether a key marks an object as a tuple, an error or the like.
+
+    A key of a dict that starts with "$" is written with one more, so it
+    starts with two.
+    """
+    return key.startswith("$") and not key.startswith("$$")
 
 
 def _string(what: str, value: Any) -> str:
@@ -426,8 +591,8 @@ def _once(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return record
 
 
-def _opening(record: dict[str, Any]) -> str:
-    """Checks the first line and returns the scenario's name."""
+def _opening(record: dict[str, Any]) -> tuple[int, str]:
+    """Checks the first line and returns the version and the scenario's name."""
     _expect_kind(1, record, _OPENING)
     if "version" not in record:
         raise FormatError("line 1 gives no version")
@@ -439,13 +604,21 @@ def _opening(record: dict[str, Any]) -> str:
             f"line 1 gives version {json.dumps(version)}, and this reader "
             f"knows versions {' and '.join(map(str, _VERSIONS))}")
     _expect_keys(1, record, ("version", "scenario"))
-    return _typed(1, record, {"scenario": str})["scenario"]
+    return version, _typed(1, record, {"scenario": str})["scenario"]
 
 
-def _step(number: int, record: dict[str, Any]) -> dict[str, Any]:
-    _expect_kind(number, record, "step")
-    _expect_keys(number, record, _STEP)
-    return _typed(number, record, _STEP)
+def _fields(
+    number: int, record: dict[str, Any], kinds: Mapping[str, type]
+) -> dict[str, Any]:
+    """Returns the fields of a step line or a draw line.
+
+    Args:
+        number: The line's number.
+        record: The line.
+        kinds: The keys a line of its kind has, each with its type.
+    """
+    _expect_keys(number, record, kinds)
+    return _typed(number, record, kinds)
 
 
 def _end(number: int, record: dict[str, Any]) -> dict[str, Any] | None:
@@ -461,11 +634,14 @@ def _end(number: int, record: dict[str, Any]) -> dict[str, Any] | None:
     return _typed(number, violation, _VIOLATION)
 
 
-def _expect_kind(number: int, record: Mapping[str, Any], kind: str) -> None:
-    if record.get("kind") != kind:
+def _expect_kind(number: int, record: Mapping[str, Any], *kinds: str) -> str:
+    """Returns the kind of a line, which must be one of those given."""
+    kind = record.get("kind")
+    if kind not in kinds:
         raise FormatError(
-            f"line {number} is of kind {json.dumps(record.get('kind'))}, "
-            f"not {json.dumps(kind)}")
+            f"line {number} is of kind {json.dumps(kind)}, not "
+            f"{' or '.join(map(json.dumps, kinds))}")
+    return kind
 
 
 def _expect_keys(
