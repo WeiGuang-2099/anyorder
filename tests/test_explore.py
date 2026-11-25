@@ -280,6 +280,22 @@ def test_exhaust_refuses_a_run_that_ends_inside_its_prefix():
         next(runs)
 
 
+def test_exhaust_refuses_a_run_that_ends_one_step_inside_its_prefix():
+    calls = {"a": 2, "b": 2}
+    quiet = set()
+    runs = explore.exhaust(_ringers(calls, quiet))
+    assert next(runs).schedule == ("a", "a", "b", "b")
+    # The next schedule starts a b. Now a rings once and b not at all, so
+    # the run is over after one step, one short of what it was given.
+    calls["a"] = 1
+    quiet.add("b")
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^a run of 'bell' ended after 1 steps, inside the 2 steps "
+                  "it was given to follow$"):
+        next(runs)
+
+
 def test_seeded_failure_is_one_of_the_exhaustive_failures():
     scenario = oversell.naive()
     failure = explore.explore(scenario, range(20))
