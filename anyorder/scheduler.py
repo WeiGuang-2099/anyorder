@@ -294,7 +294,8 @@ class Moment:
     """
 
     __slots__ = (
-        "_scenario", "_world", "_pending", "_steps", "_draws", "_violation")
+        "_scenario", "_world", "_pending", "_steps", "_draws", "_violation",
+        "_drawing")
 
     def __init__(
         self,
@@ -310,6 +311,7 @@ class Moment:
         self._steps = steps
         self._draws = draws
         self._violation: Violation | None = None
+        self._drawing: str | None = None
 
     @property
     def waiting(self) -> list[str]:
@@ -319,6 +321,15 @@ class Moment:
         said yet which call it makes next.
         """
         return sorted(self._pending)
+
+    @property
+    def drawing(self) -> str | None:
+        """The agent that draws, while a sampler is asked. None at a choice.
+
+        It is not among those that wait, and it is the one agent that goes
+        on next.
+        """
+        return self._drawing
 
     @property
     def calls(self) -> dict[str, Effect]:
@@ -815,8 +826,13 @@ def _drawn(
             f"agent {name!r} cannot draw: {error}") from None
     # A copy of its own for the sampler, as a tool gets one of its
     # arguments. A value that was handed back as it is cannot change.
-    returned = sampler.sample(
-        name, given if request is given else values.take(request), moment)
+    moment._drawing = name
+    try:
+        returned = sampler.sample(
+            name, given if request is given else values.take(request),
+            moment)
+    finally:
+        moment._drawing = None
     try:
         value = values.take(returned)
     except values.NotTakenError as error:

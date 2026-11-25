@@ -3,16 +3,19 @@
 An agent's local history is what the agent has done and been given so far:
 its own calls with their arguments and results and its own draws with what
 they asked for and were given, in the order they came. An agent reaches
-nothing but through its calls and its draws, so two agents of one scenario
-with one local history go on alike.
+nothing but through its calls and its draws, so an agent that has one local
+history in two runs goes on alike in both.
 
 A configuration is the state of the world, as the scenario's snapshot gives
-it, and the local history of every agent that still waits to make a call.
+it, and the local history of the agents that wait to make a call and,
+while a sampler is asked, of the one that draws.
 Two runs that stand at one configuration go on alike under the same
 choices and the same draws: the world answers alike, and each agent does
 what its history has it do. So a search that has gone on from a
 configuration once need not go on from it again. An agent that has
-finished is left out: it has no part in what comes.
+finished is left out: it has no part in what comes. So is one that is not
+started yet, at a draw before the first call: it has done nothing, in
+every run.
 
 A value in a history is held by its key, as values.key gives it, so that 1
 is not taken for True.
@@ -27,7 +30,8 @@ an agent draws the same wherever it has seen and done the same, so a draw
 that was made once serves every schedule that comes to that place: all the
 schedules of a scenario need no more draws than there are places.
 
-Outside the scheduler: all of this is read off a Moment.
+Outside the scheduler: all of this is read off a Moment, or for the places
+of a run off the run.
 """
 
 from __future__ import annotations
@@ -49,12 +53,13 @@ Event = tuple[Hashable, ...]
 class Configuration:
     """The state of a world and what each waiting agent has seen and done.
 
-    It can be hashed, and is equal for two runs that go on alike.
+    It can be hashed. Two runs that stand at equal configurations go on
+    alike.
 
     Attributes:
         state: The state of the world, as the scenario's snapshot gives it.
-        histories: Each agent that waits to make a call with its local
-            history, in name order.
+        histories: Each agent that waits to make a call, and at a draw the
+            one that draws, with its local history, in name order.
     """
 
     state: Hashable
@@ -82,13 +87,21 @@ def local_history(
 def at(moment: scheduler.Moment) -> Configuration:
     """Returns the configuration a run stands at.
 
+    At a choice it holds the agents that wait. Asked by a sampler, it also
+    holds the agent that draws, which waits for no call yet and is the one
+    that goes on. What that agent asks to draw from is not in it: an agent
+    asks by what it has seen and done.
+
     Raises:
         MissingSnapshotError: The scenario has no snapshot.
         TypeError: The snapshot gave a value that cannot be hashed.
     """
     histories, _ = _read(moment.steps, moment.draws)
+    names = moment.waiting
+    if moment.drawing is not None:
+        names = sorted([*names, moment.drawing])
     return Configuration(moment.state(), tuple(
-        (name, tuple(histories.get(name, ()))) for name in moment.waiting))
+        (name, tuple(histories.get(name, ()))) for name in names))
 
 
 def places(

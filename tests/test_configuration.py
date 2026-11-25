@@ -433,6 +433,73 @@ def test_table_writes_a_place_the_same_under_every_python():
         assert table.sample(name, _COIN, nowhere) == "heads"
 
 
+class _Standing:
+    """A sampler that gives listed values and keeps where each draw stood.
+
+    Attributes:
+        stood: The configuration at each draw.
+        drawing: Who the moment said was drawing at each draw.
+    """
+
+    def __init__(self, *given: Any) -> None:
+        self._given = iter(given)
+        self.stood: list[configuration.Configuration] = []
+        self.drawing: list[str | None] = []
+
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> Any:
+        self.stood.append(configuration.at(moment))
+        self.drawing.append(moment.drawing)
+        return next(self._given)
+
+
+async def _twice(ctx: scheduler.AgentContext) -> None:
+    """Draws twice and notes what it drew."""
+    first = await ctx.draw("first")
+    second = await ctx.draw("second")
+    await ctx.call("note", text=f"{first} then {second}")
+
+
+def test_configuration_at_a_draw_holds_the_agent_that_draws():
+    def stood(*given: Any) -> list[configuration.Configuration]:
+        sampler = _Standing(*given)
+        scheduler.run(
+            _counter(a=_twice, b=_adder), scheduler.ReplayPolicy("ab"),
+            sampler)
+        assert sampler.drawing == ["a", "a"]
+        return sampler.stood
+
+    low, high = stood(0, 9), stood(1, 9)
+    # At its first draw a has done nothing, and b is not started yet.
+    assert low[0] == high[0] == configuration.Configuration(
+        (0, ()), (("a", ()),))
+    # At its second draw a waits for no call, and it is the agent that
+    # goes on: what it drew before is where the two runs part. Left out,
+    # the two would stand at one configuration, be given the same draw
+    # and make another call.
+    assert low[1] == configuration.Configuration(
+        (0, ()), (("a", (("draw", "first", 0),)),))
+    assert high[1] == configuration.Configuration(
+        (0, ()), (("a", (("draw", "first", 1),)),))
+
+
+def test_configuration_at_a_draw_holds_those_that_wait_beside_who_draws():
+    async def late(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("inc")
+        await ctx.draw("coin")
+
+    sampler = _Standing("heads")
+    scheduler.run(
+        _counter(a=_adder, z=late, m=_adder),
+        scheduler.ReplayPolicy("zam"), sampler)
+    # z draws after its call while a and m still wait: all three in name
+    # order, the one that draws among them.
+    assert sampler.stood == [configuration.Configuration(
+        (1, ()),
+        (("a", ()), ("m", ()), ("z", (("call", "inc", _NO_ARGS, 1),))))]
+
+
 def _configurations(
     scenario: scheduler.Scenario,
 ) -> tuple[int, dict[Hashable, Any]]:

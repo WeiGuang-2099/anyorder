@@ -2598,3 +2598,51 @@ def test_refusal_of_a_state_shows_no_more_than_the_start_of_it():
     assert str(caught.value) == (
         f"the snapshot of 'lamp' gave ['{'x' * 198}... (504 characters), "
         "which cannot be hashed: unhashable type: 'list'")
+
+
+def test_moment_says_which_agent_draws_while_a_sampler_is_asked():
+    class Asking(_Looking):
+        def __init__(self) -> None:
+            super().__init__()
+            self.who: list[tuple[str, str | None]] = []
+
+        def choose(self, moment: scheduler.Moment) -> str:
+            self.who.append(("choice", moment.drawing))
+            return super().choose(moment)
+
+        def sample(
+            self, agent: str, request: Any, moment: scheduler.Moment
+        ) -> int:
+            self.who.append((agent, moment.drawing))
+            return super().sample(agent, request, moment)
+
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("start")
+        await ctx.call("record", entry=ctx.name)
+        await ctx.draw("after")
+
+    looking = Asking()
+    scheduler.run(_scenario(a=drawer, b=drawer), looking, looking)
+    # At a draw, the agent that draws, which is not among those that
+    # wait. At a choice nobody draws.
+    assert looking.who == [
+        ("a", "a"), ("b", "b"), ("choice", None), ("a", "a"),
+        ("choice", None), ("b", "b")]
+    assert looking.moments[0].drawing is None
+
+
+def test_moment_says_that_nobody_draws_once_a_sampler_has_failed():
+    class Failing(_Looking):
+        def sample(
+            self, agent: str, request: Any, moment: scheduler.Moment
+        ) -> int:
+            raise ValueError("no draw today")
+
+    async def drawer(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("record", entry=ctx.name)
+        await ctx.draw("coin")
+
+    looking = Failing()
+    with pytest.raises(ValueError, match="no draw today"):
+        scheduler.run(_scenario(a=drawer), looking, looking)
+    assert looking.moments[0].drawing is None
