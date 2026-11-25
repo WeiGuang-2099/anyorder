@@ -2368,3 +2368,50 @@ def test_state_of_a_world_is_what_the_scenarios_snapshot_gives():
     assert scheduler.state_of(scenario, lamp) == (False, 1)
     with pytest.raises(scheduler.MissingSnapshotError, match="'lamp'"):
         scheduler.state_of(_lamp(1), lamp)
+
+
+@pytest.mark.parametrize(
+    "entry,shown",
+    [(["a"], "['a']"), ({"a": 1}, "{'a': 1}"), (None, "None"), (7, "7")],
+    ids=["list", "dict", "none", "int"])
+def test_replay_refuses_an_entry_that_is_no_name_of_an_agent(entry, shown):
+    # Also one that cannot be looked up: it names nobody that waits.
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.run(_scenario(), scheduler.ReplayPolicy([entry]))
+    assert str(caught.value) == (
+        f"step 1 names {shown}, which is not waiting; waiting: a, b")
+
+
+def test_replay_of_steps_refuses_another_tool_called_with_the_same_arguments():
+    class Door:
+        def open(self) -> None:
+            pass
+
+        def shut(self) -> None:
+            pass
+
+    async def porter(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("shut")
+
+    scenario = scheduler.Scenario(
+        name="door", make_world=Door, agents={"a": porter}, invariants=())
+    # Neither call has an argument, so only the tool tells them apart.
+    step = scheduler.Step("a", "open", {}, None)
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        scheduler.run(scenario, scheduler.ReplayPolicy([step]))
+    assert str(caught.value) == (
+        "step 1 is open(), but agent 'a' waits to call shut()")
+
+
+class _Stride(scheduler.Step):
+    """A step of another type, which can say of itself what it likes."""
+
+
+def test_replay_takes_a_step_and_nothing_that_passes_for_one():
+    stride = _Stride("a", "record", {"entry": "a:1"}, None)
+    # Neither a name nor a step: it names nobody that waits.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^step 1 names _Stride\\(agent='a', .*\\), which is not "
+                  "waiting; waiting: a, b$"):
+        scheduler.run(_scenario(), scheduler.ReplayPolicy([stride]))
