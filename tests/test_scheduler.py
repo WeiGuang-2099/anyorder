@@ -1852,6 +1852,27 @@ def test_weights_of_a_written_distribution_are_given_in_its_order():
     assert scheduler.weights("a", request) == [1, 2, 3]
     # Of lists as well, as a sampler is given one that an agent built.
     assert scheduler.weights("a", [["H", 1], ["T", 4]]) == [1, 4]
+    # In the order of the outcomes, which need not be that of the weights.
+    assert scheduler.weights("a", (("x", 3), ("y", 1), ("z", 2))) == [3, 1, 2]
+
+
+def test_weights_are_refused_whichever_pair_is_wrong():
+    # The last pair is a right one in each: every pair is looked at.
+    for request in (
+            (("x", 0), ("y", 1)), (("x", True), ("y", 1)),
+            (("x",), ("y", 1)), ("xy", ("y", 1))):
+        with pytest.raises(scheduler.UnsupportedValueError):
+            scheduler.weights("a", request)
+
+
+def test_weights_are_refused_for_what_is_more_than_a_tuple_or_a_list():
+    class Pairs(tuple):
+        """A tuple that is more than a tuple."""
+
+    # No call carries one, so only a caller of its own can give one.
+    for request in (Pairs((("x", 1),)), (Pairs(("x", 1)),)):
+        with pytest.raises(scheduler.UnsupportedValueError):
+            scheduler.weights("a", request)
 
 
 @pytest.mark.parametrize(

@@ -867,9 +867,27 @@ def test_judged_scenario_is_the_scenario_with_one_more_check_at_the_end():
     assert tuple(own) == tuple(base.invariants)
     assert added.name == _NO_SERIAL_ORDER
     assert added.every_step is False
-    # The serial orders were run for it, each twice, and no run since.
+    # A fresh world is no outcome of a serial order: both units are there.
     assert added.check(base.make_world()) == (
         "the run left (2, ()), which no serial order leaves")
+
+
+def test_judged_scenario_runs_the_serial_orders_once_and_no_more():
+    base = oversell.naive(stock=2, buyers=2)
+    built = []
+
+    def make_world() -> oversell.Inventory:
+        built.append(None)
+        return base.make_world()
+
+    judged = oracle.judged(dataclasses.replace(base, make_world=make_world))
+    # The 2 serial orders, each twice.
+    assert len(built) == 4
+    run = explore.replay(judged, _BOTH_READ_FIRST)
+    assert run.violation is not None
+    assert run.violation.invariant == _NO_SERIAL_ORDER
+    # One world for the run, and none for a serial order.
+    assert len(built) == 5
 
 
 def test_judged_scenario_fails_exactly_where_the_oracle_says_so():
@@ -928,7 +946,13 @@ def test_failure_that_only_the_oracle_sees_is_shrunk_and_written():
         text = tracefile.dumps(judged, shrunk)
         assert tracefile.replay(judged, tracefile.loads(text)) == shrunk
     # A shrunk run breaks the same check and need not leave the same
-    # state: the two orders are placed the other way round in 4 of the 12.
+    # state. In a shrunk run the buyer that wrote first runs to its end
+    # between the other's read and write, so its order is placed first.
+    # In the run it came from, that buyer's write is followed by its own
+    # order and the other's write and order, in 3 ways, and its order is
+    # the last in 1 of them. That is 1 run for each of the 2 orders of
+    # the reads and each of the 2 buyers that can write first: 4 of the
+    # 12 have the orders the other way round.
     assert other_state == 4
 
 
@@ -948,8 +972,9 @@ def test_solver_values_a_failure_that_only_the_oracle_sees():
     assert solve.adaptive(base).value == 0
     assert solve.adaptive(judged).value == 1
     # After the first read the two wait side by side. With 1/2 the same
-    # buyer writes, and what follows is a serial order. With 1/2 the other
-    # reads 2 as well, and an update is lost.
+    # buyer writes, and the run leaves what a serial order leaves, however
+    # the calls after that fall. With 1/2 the other reads 2 as well, and
+    # an update is lost.
     assert solve.uniform(judged) == fractions.Fraction(1, 2)
     assert solve.clairvoyant(judged) == 1
 
@@ -1604,3 +1629,98 @@ def test_judged_violation_shows_no_more_than_the_start_of_a_long_state():
     assert judged.invariants[-1].check(world) == (
         f"the run left {shown[:200]}... ({len(shown)} characters), which no "
         "serial order leaves")
+
+
+async def _bumper(ctx: scheduler.AgentContext) -> None:
+    await ctx.call("put", value=await ctx.call("read") + 1)
+
+
+def test_judged_scenario_keeps_its_own_checks_for_the_serial_orders():
+    made = []
+
+    class Numbered(_Cell):
+        """A number whose world knows how many were made before it."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            made.append(self)
+            self.number = len(made)
+
+    scenario = scheduler.Scenario(
+        name="numbered", make_world=Numbered,
+        agents={"a": _bumper, "b": _bumper},
+        invariants=(scheduler.Invariant(
+            "numbered", lambda cell: f"world {cell.number} ended",
+            every_step=False),),
+        snapshot=lambda cell: cell.value)
+    # The serial orders are run with the scenario's own invariants, so a
+    # violation that is worded otherwise in the second run of an order is
+    # a trace that did not come twice.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^the schedule 'a a b b' of 'numbered' replayed to a "
+                  "different trace$"):
+        oracle.judged(scenario)
+
+
+def test_judged_check_names_a_state_that_cannot_be_hashed():
+    # The state can be hashed after every serial order, which ends at 2,
+    # and not after the run that loses an update and ends at 1.
+    scenario = scheduler.Scenario(
+        name="bumped", make_world=_Cell, agents={"a": _bumper, "b": _bumper},
+        invariants=(),
+        snapshot=lambda cell: cell.value if cell.value == 2 else [cell.value])
+    with pytest.raises(TypeError) as caught:
+        explore.replay(oracle.judged(scenario), ["a", "b", "a", "b"])
+    assert str(caught.value) == (
+        "the snapshot of 'bumped' gave [1], which cannot be hashed: "
+        "unhashable type: 'list'")
+
+
+class _Marks:
+    """Two cells, x and y, of which y can be read."""
+
+    def __init__(self) -> None:
+        self.x: object = None
+        self.y: object = None
+
+    def get_y(self) -> object:
+        return self.y
+
+    def put_x(self, value: object) -> None:
+        self.x = value
+
+    def put_y(self, value: object) -> None:
+        self.y = value
+
+
+def test_judged_scenario_compares_states_as_the_oracle_does():
+    async def marker(ctx: scheduler.AgentContext) -> None:
+        seen = await ctx.call("get_y")
+        await ctx.call("put_x", value=1 if seen is None else True)
+
+    async def blinker(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("put_y", value="on")
+        await ctx.call("put_y", value=None)
+
+    base = scheduler.Scenario(
+        name="marks", make_world=_Marks, agents={"a": marker, "b": blinker},
+        invariants=(), snapshot=lambda marks: (marks.x, marks.y))
+    serial = oracle.serial_outcomes(base)
+    # One after another, a reads None and x ends at 1.
+    assert list(serial.orders) == [(1, None)]
+    runs = list(explore.exhaust(oracle.judged(base)))
+    assert len(runs) == 6
+    # In 2 of the 6 schedules a reads between the two writes of b, and x
+    # ends at True.
+    put = [
+        step.args["value"] for run in runs for step in run.steps
+        if step.tool == "put_x"]
+    assert sum(value is True for value in put) == 2
+    assert sum(value is not True and value == 1 for value in put) == 4
+    # The oracle takes 1 and True for one state, as Python does, and so
+    # does its check as an invariant.
+    for run in runs:
+        assert run.violation is None
+        assert not oracle.judge(
+            serial, explore.replay(base, run.steps)).failed
