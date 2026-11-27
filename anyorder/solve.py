@@ -25,8 +25,8 @@ a draw, its start replayed from the steps and the draws of the run before.
 A scenario that is not the same twice is therefore refused here as an
 exhaustive search refuses it, where the replay sees it: an agent that
 waits to make another call, asks to draw from something else, or is
-answered otherwise. Every run goes to its end, so whatever ends a run
-ends the search.
+answered otherwise. Every run goes to its end and every choice is tried,
+also once a schedule has failed, so whatever ends a run ends the search.
 
 Two runs that stand at one configuration go on alike, so what follows a
 configuration is worked out once and looked up after that. A run is
@@ -336,7 +336,10 @@ class _Search:
         """Says whether a schedule fails from a point on, under a table.
 
         Under a table the agents are a program with no chance left in
-        it: every draw is given, and only the choices are tried.
+        it: every draw is given, and only the choices are tried. Each of
+        them is, also once a schedule has failed: a run that would end
+        this search for any other reason must end it whichever schedule
+        is tried first.
 
         Args:
             table: The draws, by place.
@@ -357,11 +360,9 @@ class _Search:
             return known[reached.key]
         found = False
         for name in reached.waiting:
-            if self.some_schedule_fails(
-                    table, known, reached.steps, reached.draws,
-                    (_CHOOSE, name)):
-                found = True
-                break
+            found = self.some_schedule_fails(
+                table, known, reached.steps, reached.draws,
+                (_CHOOSE, name)) or found
         if reached.key is not None:
             known[reached.key] = found
         return found
@@ -604,8 +605,12 @@ def clairvoyant(
 
     A table is filled in as the search comes to its places: at a place it
     lacks, the tables that give each outcome there are taken apart, each
-    with the outcome's chance. So the work can grow with the product of
-    the outcomes over the places, and nothing is promised of its cost.
+    with the outcome's chance. Under a table every schedule is tried, also
+    once one has failed, so whatever ends a run under one schedule ends
+    this search as it ends the uniform and the adaptive one, once the
+    tables before that one have been gone through. So the work can grow
+    with the product of the outcomes over the places, and nothing is
+    promised of its cost.
 
     Args:
         scenario: What to solve, as uniform takes it.

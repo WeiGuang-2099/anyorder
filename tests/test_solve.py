@@ -612,6 +612,10 @@ def test_clairvoyant_value_of_an_example_that_fails_is_1(scenario, calls):
     # Nothing is drawn, so there is one table and nothing to know ahead:
     # the value is whether a schedule fails.
     assert solve.clairvoyant(scenario, limit=calls) == 1
+    # Every schedule was tried for that, also after the first that fails,
+    # and the longest among them.
+    with pytest.raises(solve.TooLongError):
+        solve.clairvoyant(scenario, limit=calls - 1)
 
 
 @pytest.mark.parametrize(
@@ -629,6 +633,59 @@ def test_clairvoyant_value_of_a_control_is_0(scenario, calls):
     # Every schedule was tried for that, the longest among them.
     with pytest.raises(solve.TooLongError):
         solve.clairvoyant(scenario, limit=calls - 1)
+
+
+class _Readable(_Tally):
+    """A sum that can also be read."""
+
+    def read(self) -> int:
+        return self.total
+
+
+def _read_and_added(**agents: scheduler.Agent) -> scheduler.Scenario:
+    """A sum that must never be 1, with agents that add to it and read it."""
+    return scheduler.Scenario(
+        name="tally", make_world=_Readable, agents=agents,
+        invariants=(_never(1, every_step=True),),
+        snapshot=lambda tally: tally.total)
+
+
+async def _adds_one(ctx: scheduler.AgentContext) -> None:
+    await ctx.call("add", amount=1)
+
+
+@pytest.mark.parametrize("lookup", [True, False], ids=["looked-up", "all"])
+def test_clairvoyant_search_tries_every_schedule_under_a_table(lookup):
+    async def strays_at_0(ctx: scheduler.AgentContext) -> None:
+        if await ctx.call("read") == 0:
+            await ctx.call("no_such_tool")
+
+    async def loops_at_0(ctx: scheduler.AgentContext) -> None:
+        while await ctx.call("read") == 0:
+            pass
+
+    # With the adder first the sum is 1 and the run has failed. With the
+    # reader first it reads 0, and its run ends in a call that the world
+    # has no tool for, or does not end. A search that stopped at the first
+    # failing schedule would give 1 under the names that put the failing
+    # schedule first, and under no other names. Every schedule is tried,
+    # so what ends a run ends this search as it ends the others, whatever
+    # the agents are called.
+    for agents in (
+            {"a": _adds_one, "b": strays_at_0},
+            {"a": strays_at_0, "b": _adds_one}):
+        scenario = _read_and_added(**agents)
+        with pytest.raises(scheduler.UnknownToolError):
+            list(explore.exhaust(scenario))
+        for value in _VALUES:
+            with pytest.raises(scheduler.UnknownToolError):
+                value(scenario, lookup=lookup)
+    for agents in (
+            {"a": _adds_one, "b": loops_at_0},
+            {"a": loops_at_0, "b": _adds_one}):
+        for value in _VALUES:
+            with pytest.raises(solve.TooLongError):
+                value(_read_and_added(**agents), limit=30, lookup=lookup)
 
 
 _VALUES = [
@@ -662,6 +719,32 @@ def test_looking_runs_up_gives_the_values_of_the_counter_in_fewer_runs():
     # from there on are made once.
     assert _runs_made(scenario, solve.uniform, lookup=False) == 51
     assert _runs_made(scenario, solve.uniform) == 41
+    # The clairvoyant search starts again under each table, and under a
+    # table it looks runs up as well.
+    assert _runs_made(scenario, solve.clairvoyant) < _runs_made(
+        scenario, solve.clairvoyant, lookup=False)
+
+
+@pytest.mark.parametrize("lookup", [True, False], ids=["looked-up", "all"])
+@pytest.mark.parametrize(
+    "scenario,calls",
+    [
+        (oversell.naive(stock=1, buyers=2), 6),
+        (oversell.naive(stock=2, buyers=2), 6),
+        (lost_update.naive(editors=2), 4),
+        (lost_update.cas(editors=2), 6),
+        (write_skew.cas(doctors=3), 6),
+    ],
+    ids=lambda given: getattr(given, "name", str(given)))
+def test_clairvoyant_search_of_one_table_makes_the_runs_of_the_uniform_one(
+    scenario, calls, lookup
+):
+    # Nothing is drawn, so there is one table, and under it the search
+    # makes one run for each choice, whether a schedule has failed or not:
+    # the runs that the uniform value takes, looked up or not.
+    assert _runs_made(
+        scenario, solve.clairvoyant, limit=calls, lookup=lookup
+    ) == _runs_made(scenario, solve.uniform, limit=calls, lookup=lookup)
 
 
 @pytest.mark.parametrize("value", _VALUES, ids=_VALUE_IDS)
