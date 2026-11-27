@@ -8,6 +8,9 @@ as an exact fraction for the schedulers a result is held against:
   is what a seeded search does.
 * serial: the agents one after another, in a given order.
 * round_robin: one call each in turn, in name order.
+* adaptive: the scheduler that does the most harm of all that see
+  everything that has happened and every waiting call, and no draw that is
+  still to come. With it comes one failing run.
 
 A failure is a broken invariant of the scenario, as it is for every search:
 a run fails if it breaks what must hold after every step, also when the
@@ -36,6 +39,7 @@ import fractions
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from anyorder import explore
 from anyorder import scheduler
 
 Fraction = fractions.Fraction
@@ -178,11 +182,16 @@ _Merge = Callable[[Sequence[Fraction]], Fraction]
 
 
 class _Search:
-    """Tries every decision of a scenario's runs, one run for each."""
+    """Tries every decision of a scenario's runs, one run for each.
+
+    Attributes:
+        failure: The first failing run met so far, if any.
+    """
 
     def __init__(self, scenario: scheduler.Scenario, limit: int) -> None:
         self._scenario = scenario
         self._limit = limit
+        self.failure: scheduler.RunResult | None = None
 
     def value(
         self,
@@ -204,7 +213,11 @@ class _Search:
         """
         reached = self._advance(steps, draws, then)
         if isinstance(reached, scheduler.RunResult):
-            return Fraction(reached.violation is not None)
+            if reached.violation is None:
+                return Fraction(0)
+            if self.failure is None:
+                self.failure = reached
+            return Fraction(1)
         if reached.agent is None:
             return merge([
                 self.value(
@@ -353,3 +366,55 @@ def round_robin(
         return [next(name for name in turn if name in edge.waiting)]
 
     return _Search(scenario, limit).value(next_in_turn, _only)
+
+
+@dataclasses.dataclass(frozen=True)
+class Adaptive:
+    """What the strongest scheduler does to a scenario.
+
+    Attributes:
+        value: The largest chance of a failing run that a scheduler
+            reaches.
+        failure: One failing run, or None if the value is 0. It is the
+            first that the search met, with the waiting agents tried in
+            name order and the outcomes of a draw as they are written, and
+            it is no more than one way to fail: the strongest scheduler
+            need not take it.
+    """
+
+    value: Fraction
+    failure: scheduler.RunResult | None
+
+
+def adaptive(scenario: scheduler.Scenario, *, limit: int = LIMIT) -> Adaptive:
+    """Returns the largest chance of a failing run under any scheduler.
+
+    The scheduler chooses each next agent knowing all that has happened
+    and every waiting call, and no draw that is still to come: at a
+    choice it takes the agent with the largest chance from there on, and
+    a draw comes by its weights. No scheduler that goes by the run so far
+    does more harm, and one that also knew the draws to come could.
+
+    A failing run is replayed from its steps and its draws before it is
+    returned, so a reported failure is one that can be reproduced.
+
+    Args:
+        scenario: What to solve, as uniform takes it.
+        limit: How many choices and draws a run is followed for.
+
+    Raises:
+        TooLongError: A run went past the limit.
+        ReplayDivergenceError: A run did not make its start again, or the
+            failing run did not replay to the same trace.
+        UnsupportedValueError: An agent asked to draw from something that
+            is no written distribution.
+    """
+    search = _Search(scenario, limit)
+    value = search.value(lambda edge: edge.waiting, max)
+    failure = search.failure
+    if failure is not None and explore.replay(
+            scenario, failure.steps, failure.draws) != failure:
+        raise scheduler.ReplayDivergenceError(
+            f"a failing run of {scenario.name!r} replayed to a different "
+            "trace")
+    return Adaptive(value, failure)

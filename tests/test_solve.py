@@ -222,7 +222,7 @@ def test_request_that_is_no_written_distribution_is_refused():
 
     scenario = _tallying(a=guesser)
     for value in (
-            solve.uniform, solve.round_robin,
+            solve.uniform, solve.round_robin, solve.adaptive,
             lambda given: solve.serial(given, ["a"])):
         with pytest.raises(
                 scheduler.UnsupportedValueError,
@@ -308,8 +308,9 @@ def test_run_is_followed_for_as_many_choices_and_draws_as_the_limit():
         solve.uniform,
         solve.round_robin,
         lambda scenario: solve.serial(scenario, ["a"]),
+        solve.adaptive,
     ],
-    ids=["uniform", "round-robin", "serial"])
+    ids=["uniform", "round-robin", "serial", "adaptive"])
 def test_agent_that_never_ends_is_refused(value):
     async def caller(ctx: scheduler.AgentContext) -> None:
         while True:
@@ -405,3 +406,112 @@ def test_uniform_value_of_a_control_and_of_the_fix_that_fails(
     assert solve.round_robin(scenario, limit=calls) in (0, 1)
     with pytest.raises(solve.TooLongError):
         solve.uniform(scenario, limit=calls - 1)
+
+
+def test_adaptive_scheduler_loses_an_inc_one_time_in_two():
+    scenario = _counting()
+    # A scheduler that sees everything so far chooses what a reads before
+    # a draws. After a read of 0, a sets one time in four. After a read of
+    # 1 it sets one time in two, and the other inc still waits beside the
+    # set and is put before it: 1/2. After a read of 2 nothing is left to
+    # lose. So the best scheduler runs one inc first, and no scheduler
+    # that cannot see the draw to come does better.
+    solved = solve.adaptive(scenario)
+    assert solved.value == Fraction(1, 2)
+    # With the value comes one failing run: the first the search met, with
+    # the agents tried in name order and the outcomes as they are written.
+    # Here a reads 0, draws that it sets, and b adds before it does.
+    assert solved.failure == scheduler.RunResult(
+        steps=(
+            scheduler.Step("a", "read", {}, 0),
+            scheduler.Step("b", "inc", {}, None),
+            scheduler.Step("a", "set", {"value": 10}, None),
+            scheduler.Step("c", "inc", {}, None),
+        ),
+        violation=scheduler.Violation(
+            "ends-at-12", "the counter ends at 11, not 12", 4),
+        draws=(scheduler.Drawn("a", _RARELY, True, 1),))
+    failure = solved.failure
+    assert explore.replay(scenario, failure.steps, failure.draws) == failure
+
+
+def test_adaptive_value_is_at_least_that_of_every_scheduler_it_can_be():
+    for setter in "abc":
+        scenario = _counting(setter)
+        # The names do not matter to a scheduler that may choose anybody.
+        assert solve.adaptive(scenario).value == Fraction(1, 2)
+        assert solve.uniform(scenario) < Fraction(1, 2)
+        assert solve.round_robin(scenario) <= Fraction(1, 2)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        oversell.naive(stock=1, buyers=2),
+        oversell.naive(stock=1, buyers=3),
+        lost_update.naive(editors=2),
+        lost_update.naive(editors=3),
+        write_skew.naive(doctors=2),
+        write_skew.naive(doctors=3),
+    ],
+    ids=lambda scenario: scenario.name)
+def test_adaptive_value_of_an_example_that_fails_is_1(scenario):
+    solved = solve.adaptive(scenario)
+    assert solved.value == 1
+    # Nothing is drawn, so the search goes through the schedules as an
+    # exhaustive search does and meets the same failing run first.
+    assert solved.failure == next(
+        run for run in explore.exhaust(scenario) if run.violation is not None)
+
+
+@pytest.mark.parametrize(
+    "scenario,calls,value",
+    [
+        (oversell.naive(stock=2, buyers=2), 6, 0),
+        (oversell.atomic(stock=1, buyers=3), 3, 0),
+        (lost_update.cas(editors=2), 6, 0),
+        (lost_update.cas(editors=3), 12, 0),
+        (write_skew.cas(doctors=2), 4, 1),
+        (write_skew.cas(doctors=3), 6, 1),
+        (write_skew.atomic(doctors=2), 2, 0),
+        (write_skew.atomic(doctors=3), 3, 0),
+    ],
+    ids=lambda given: getattr(given, "name", str(given)))
+def test_adaptive_value_of_a_control_and_of_the_fix_that_fails(
+    scenario, calls, value
+):
+    solved = solve.adaptive(scenario, limit=calls)
+    assert solved.value == value
+    # A failing run comes with a value above 0 and with no other.
+    assert (solved.failure is None) == (value == 0)
+    with pytest.raises(solve.TooLongError):
+        solve.adaptive(scenario, limit=calls - 1)
+
+
+def test_failing_run_is_replayed_before_it_is_returned():
+    made = []
+
+    class Numbered(_Tally):
+        """A sum whose world knows how many were made before it."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            made.append(self)
+            self.number = len(made)
+
+    def numbered(tally: Numbered) -> str | None:
+        return f"world {tally.number} ended at {tally.total}"
+
+    scenario = scheduler.Scenario(
+        name="numbered", make_world=Numbered, agents={"a": _caller(1)},
+        invariants=(
+            scheduler.Invariant("numbered", numbered, every_step=False),))
+    # Every run fails, and each in other words than the one before. The
+    # steps of a run replay, so the search goes through, and the failure
+    # it would return does not.
+    with pytest.raises(
+            scheduler.ReplayDivergenceError,
+            match="^a failing run of 'numbered' replayed to a different "
+                  "trace$"):
+        solve.adaptive(scenario)
+    assert solve.uniform(scenario) == 1
