@@ -695,6 +695,144 @@ def test_outcome_is_not_handed_to_a_draw_from_no_written_distribution(value):
         value(scenario)
 
 
+_MANY = tuple((number, 1) for number in range(60))
+
+
+@pytest.mark.parametrize(
+    "later,shown",
+    [
+        ((("x", 1), ("y", 1)), "(('x', 1), ('y', 1))"),
+        # Python takes this one for equal to the coin. An agent need not:
+        # it would be handed True where it asked for 1 or 0.
+        (((1, 1), (0, 3)), "((1, 1), (0, 3))"),
+        # A refusal shows no more than the start of a long request.
+        (_MANY, f"{repr(_MANY)[:200]}... ({len(repr(_MANY))} characters)"),
+    ],
+    ids=["words", "numbers", "many"])
+@pytest.mark.parametrize("value", _EVERY_VALUE[:4], ids=_EVERY_ID[:4])
+def test_outcome_of_one_request_is_not_handed_to_a_draw_from_another(
+    value, later, shown
+):
+    # The first run draws from a coin and stops there. The second is given
+    # an outcome of the coin, and asks to draw from something else.
+    scenario = _drifting(1, _script(_RARELY, None), _script(later, None))
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        value(scenario)
+    assert str(caught.value) == (
+        "a run of 'drifting' left the start it was given to follow: agent "
+        f"'a' draws from {shown} where agent 'a' drew from ((True, 1), "
+        "(False, 3)) before")
+
+
+@pytest.mark.parametrize("value", _EVERY_VALUE[:4], ids=_EVERY_ID[:4])
+def test_outcome_of_one_agent_is_not_handed_to_the_draw_of_another(value):
+    made = []
+
+    class Numbered(_Tally):
+        """A sum whose worlds are counted as they are made."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            made.append(self)
+
+    def drawing(in_the_first: bool) -> scheduler.Agent:
+        async def agent(ctx: scheduler.AgentContext) -> None:
+            if (len(made) == 1) == in_the_first:
+                await ctx.call(
+                    "add", amount=1 if await ctx.draw(_EVENLY) else 0)
+
+        return agent
+
+    # In the first world a draws, in every later one b, from the same
+    # coin. The second run is given an outcome for the draw of a.
+    scenario = scheduler.Scenario(
+        name="swapped", make_world=Numbered,
+        agents={"a": drawing(True), "b": drawing(False)},
+        invariants=(), snapshot=lambda tally: tally.total)
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        value(scenario)
+    assert str(caught.value) == (
+        "a run of 'swapped' left the start it was given to follow: agent "
+        "'b' draws from ((True, 1), (False, 1)) where agent 'a' drew from "
+        "((True, 1), (False, 1)) before")
+
+
+@pytest.mark.parametrize("value", _EVERY_VALUE[:4], ids=_EVERY_ID[:4])
+@pytest.mark.parametrize(
+    "ahead", [None, _EVENLY], ids=["after-a-call", "after-a-draw"])
+def test_outcome_is_held_to_its_draw_after_a_start_as_well(value, ahead):
+    # The first two worlds make a call or a draw and then draw from the
+    # coin, every later one draws from two words there. The third run
+    # replays what came before and is given an outcome of the coin.
+    scenario = _drifting(
+        2, _script(ahead, _RARELY, None),
+        _script(ahead, (("x", 1), ("y", 1)), None))
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        value(scenario)
+    assert str(caught.value) == (
+        "a run of 'drifting' left the start it was given to follow: agent "
+        "'a' draws from (('x', 1), ('y', 1)) where agent 'a' drew from "
+        "((True, 1), (False, 3)) before")
+
+
+@pytest.mark.parametrize("value", _EVERY_VALUE[:4], ids=_EVERY_ID[:4])
+def test_outcome_is_not_handed_to_an_equal_request_in_the_start(value):
+    handed = []
+
+    def drawing(first: Any) -> scheduler.Agent:
+        async def agent(ctx: scheduler.AgentContext) -> None:
+            handed.append((first, await ctx.draw(first)))
+            await ctx.draw(_EVENLY)
+            await ctx.call("add", amount=0)
+
+        return agent
+
+    # The first two worlds draw from ((True, 1),), every later one from
+    # ((1, 1),), which Python takes for equal. The second run is given
+    # True and draws again, and every later run replays that first draw.
+    # A replay holds a request as Python compares. The solver holds it by
+    # its key, so no agent is handed True where it asked for 1.
+    scenario = _drifting(2, drawing(((True, 1),)), drawing(((1, 1),)))
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        value(scenario)
+    assert str(caught.value) == (
+        "a run of 'drifting' left the start it was given to follow: agent "
+        "'a' draws from ((1, 1),) where agent 'a' drew from ((True, 1),) "
+        "before")
+    assert handed
+    assert all(
+        type(outcome) is type(request[0][0]) for request, outcome in handed)
+
+
+@pytest.mark.parametrize("value", _EVERY_VALUE[:4], ids=_EVERY_ID[:4])
+def test_refusal_of_another_draw_shows_the_start_of_a_long_request_it_held(
+    value
+):
+    # The first run draws from a long request and stops there. The second
+    # is given an outcome of it, and asks to draw from a coin.
+    scenario = _drifting(1, _script(_MANY, None), _script(_RARELY, None))
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        value(scenario)
+    assert str(caught.value) == (
+        "a run of 'drifting' left the start it was given to follow: agent "
+        "'a' draws from ((True, 1), (False, 3)) where agent 'a' drew from "
+        f"{repr(_MANY)[:200]}... ({len(repr(_MANY))} characters) before")
+
+
+@pytest.mark.parametrize("value", _EVERY_VALUE[:4], ids=_EVERY_ID[:4])
+def test_outcome_is_held_to_a_request_that_python_cannot_write(value):
+    # An integer of 9000 digits is a value a call carries, and Python
+    # does not write it out as text unless it is told to. A key holds it
+    # as it is, so a request with one is held as any other.
+    huge = 10 ** 9000
+
+    async def agent(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw(((huge, 1), (0, 1)))
+        await ctx.call("add", amount=0)
+
+    assert value(_tallying(a=agent)) == 0
+
+
 def _caller(calls: int) -> scheduler.Agent:
     async def agent(ctx: scheduler.AgentContext) -> None:
         for _ in range(calls):

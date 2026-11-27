@@ -125,7 +125,8 @@ class _Hole(Exception):
 _Table = dict[Hashable, Any]
 
 
-# A decision: the agent that is chosen, or the outcome that is drawn.
+# A decision: the agent that is chosen, or the outcome that is drawn with
+# the agent that draws it and what it draws from.
 _Decision = tuple[str, Any]
 _CHOOSE = "choose"
 _DRAW = "draw"
@@ -184,7 +185,11 @@ class _Guide:
                     f"draw {self._drawn + 1} was made after {self._chosen} "
                     f"steps, not after {held.step}")
             self._drawn += 1
-            return self._sampler.sample(agent, request, moment)
+            # The replay refuses a draw by another agent, and from another
+            # request as Python compares. Then the key, which is finer.
+            value = self._sampler.sample(agent, request, moment)
+            self._hold(agent, request, held.agent, held.request)
+            return value
         if self._chosen < len(self._steps):
             raise self._left("it draws where it made a call before")
         # Here, so that a request the package refuses is refused with the
@@ -228,12 +233,39 @@ class _Guide:
                 if kind == _DRAW else
                 "it waits for a choice where it drew before")
         self.then = None
-        if kind == _CHOOSE and decision not in moment.waiting:
-            # Not left to the scheduler, which looks the name up and says
-            # nothing of a start.
+        if kind == _CHOOSE:
+            if decision not in moment.waiting:
+                # Not left to the scheduler, which looks the name up and
+                # says nothing of a start.
+                raise self._left(
+                    f"agent {decision!r} does not wait where it waited "
+                    "before")
+            return decision
+        who, held, outcome = decision
+        self._hold(agent, request, who, held)
+        return outcome
+
+    def _hold(self, agent: str, request: Any, who: str, held: Any) -> None:
+        """Refuses a draw that is not the one an outcome is held for.
+
+        An outcome was worked out for one agent's draw from one thing, or
+        was drawn so in the start, and is no outcome of another draw. The
+        request is held by its key: a request with 1 is not the request
+        with True, which Python takes for equal and an agent need not.
+
+        Args:
+            agent: The agent that draws.
+            request: What it asks to draw from.
+            who: The agent the outcome is held for.
+            held: What that agent drew from.
+
+        Raises:
+            ReplayDivergenceError: It is another agent or another request.
+        """
+        if who != agent or values.key(held) != values.key(request):
             raise self._left(
-                f"agent {decision!r} does not wait where it waited before")
-        return decision
+                f"agent {agent!r} draws from {values.shown(request)} where "
+                f"agent {who!r} drew from {values.shown(held)} before")
 
     def _key(self, moment: scheduler.Moment) -> Hashable | None:
         """Returns what the run is looked up by where it stands.
@@ -329,7 +361,7 @@ class _Search:
             for outcome, chance in _chances(reached.agent, reached.request):
                 found += chance * self.value(
                     among, merge, reached.steps, reached.draws,
-                    (_DRAW, outcome))
+                    (_DRAW, (reached.agent, reached.request, outcome)))
         if reached.key is not None:
             self._known[reached.key] = found
         return found
