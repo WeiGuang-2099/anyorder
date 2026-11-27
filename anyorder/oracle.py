@@ -26,6 +26,7 @@ from typing import Any
 
 from anyorder import explore
 from anyorder import scheduler
+from anyorder import values
 
 Snapshot = Callable[[Any], Hashable]
 Order = tuple[str, ...]
@@ -160,6 +161,56 @@ def judge(serial: SerialOutcomes, result: scheduler.RunResult) -> Verdict:
                 f"ended in another state when it was run again: {outcome!r}, "
                 f"then {again!r}")
     return Verdict(outcome, orders)
+
+
+def judged(scenario: scheduler.Scenario) -> scheduler.Scenario:
+    """Returns a scenario whose runs fail where the oracle says they do.
+
+    It is the scenario with one more invariant, asked at the end and
+    after its own: the state the run left is the outcome of some serial
+    order. So a failure that only the oracle sees is a broken invariant
+    like any other. A search finds it, its violation says what the run
+    left, the shrinker shrinks it, a trace file holds it and the solver
+    counts it.
+
+    A run that breaks an invariant of the scenario itself is reported for
+    that one: a run keeps its first violation.
+
+    The shrinker holds a failure to the invariant it broke and not to
+    the state it left, so a shrunk run can leave another state that no
+    serial order leaves. Its violation says which.
+
+    A trace file of a run of the scenario returned here replays on that
+    scenario, and not on the one it was made from, which has no such
+    check.
+
+    The serial orders are run here, once, as serial_outcomes runs them.
+    For a scenario whose agents do not draw.
+
+    Args:
+        scenario: What to judge. Its snapshot gives the state of a world.
+
+    Raises:
+        ReplayDivergenceError: A serial order did not give the same trace
+            and the same outcome twice.
+        MissingSnapshotError: The scenario has no snapshot. Nothing has
+            run.
+        TypeError: The snapshot gave a value that cannot be hashed.
+        UnsupportedAwaitError: An agent drew.
+    """
+    serial = serial_outcomes(scenario)
+
+    def check(world: Any) -> str | None:
+        state = scheduler.state_of(scenario, world)
+        if state in serial.orders:
+            return None
+        return (
+            f"the run left {values.shown(state)}, which no serial order "
+            "leaves")
+
+    return dataclasses.replace(scenario, invariants=(
+        *scenario.invariants,
+        scheduler.Invariant("serial-outcome", check, every_step=False)))
 
 
 class _SerialPolicy:

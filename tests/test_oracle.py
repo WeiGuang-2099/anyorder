@@ -8,6 +8,7 @@ not see.
 
 import collections
 import dataclasses
+import fractions
 import functools
 import itertools
 from collections.abc import Hashable
@@ -17,6 +18,8 @@ import pytest
 from anyorder import explore
 from anyorder import oracle
 from anyorder import scheduler
+from anyorder import shrink
+from anyorder import solve
 from anyorder import tracefile
 from anyorder.scenarios import lost_update
 from anyorder.scenarios import oversell
@@ -840,3 +843,165 @@ def test_run_that_drew_is_not_judged():
                   "yet$"):
         oracle.judge(serial, run)
     assert not built
+
+
+_NO_SERIAL_ORDER = "serial-outcome"
+
+
+def _judged_two_units() -> tuple[scheduler.Scenario, scheduler.Scenario]:
+    """Two buyers of two units, as they are and with the oracle's check."""
+    base = oversell.naive(stock=2, buyers=2)
+    return base, oracle.judged(base)
+
+
+def test_judged_scenario_is_the_scenario_with_one_more_check_at_the_end():
+    base, judged = _judged_two_units()
+    assert judged.name == base.name
+    assert judged.agents is base.agents
+    assert judged.make_world is base.make_world
+    assert judged.snapshot is base.snapshot
+    *own, added = judged.invariants
+    assert tuple(own) == tuple(base.invariants)
+    assert added.name == _NO_SERIAL_ORDER
+    assert added.every_step is False
+    # The serial orders were run for it, each twice, and no run since.
+    assert added.check(base.make_world()) == (
+        "the run left (2, ()), which no serial order leaves")
+
+
+def test_judged_scenario_fails_exactly_where_the_oracle_says_so():
+    base, judged = _judged_two_units()
+    serial = oracle.serial_outcomes(base)
+    runs = list(explore.exhaust(judged))
+    assert len(runs) == 20
+    failing = [run for run in runs if run.violation is not None]
+    # The 12 schedules in which both read before either writes: the stock
+    # ends at 1, where every serial order ends at 0.
+    assert len(failing) == 12
+    for run in runs:
+        plain = explore.replay(base, run.schedule)
+        assert plain.violation is None
+        assert plain.steps == run.steps
+        assert oracle.judge(serial, plain).failed == (
+            run.violation is not None)
+    # The check is asked once every agent has finished, and says what the
+    # run left.
+    assert {run.violation for run in failing} == {
+        scheduler.Violation(
+            _NO_SERIAL_ORDER,
+            f"the run left (1, {orders!r}), which no serial order leaves", 6)
+        for orders in (_B1_B2, _B2_B1)}
+
+
+def test_search_finds_a_failure_that_only_the_oracle_sees():
+    base, judged = _judged_two_units()
+    assert explore.explore(base, range(2000)) is None
+    failure = explore.explore(judged, range(20))
+    assert failure is not None
+    assert failure.seed == 4
+    assert failure.result.schedule == (
+        "buyer-1", "buyer-2", "buyer-1", "buyer-2", "buyer-2", "buyer-1")
+    assert failure.result.violation == scheduler.Violation(
+        _NO_SERIAL_ORDER,
+        "the run left (1, ('buyer-2', 'buyer-1')), which no serial order "
+        "leaves", 6)
+
+
+def test_failure_that_only_the_oracle_sees_is_shrunk_and_written():
+    _, judged = _judged_two_units()
+    failing = [
+        run for run in explore.exhaust(judged) if run.violation is not None]
+    other_state = 0
+    for run in failing:
+        shrunk = shrink.shrink(judged, run).result
+        # One buyer reads, the other runs to its end, the first finishes:
+        # 2 switches and 2 buyers, and no failure is smaller. The check is
+        # asked at the end, so every step of the run counts.
+        assert shrink.size(shrunk) == (2, 2)
+        assert shrunk.violation.invariant == _NO_SERIAL_ORDER
+        other_state += shrunk.violation.message != run.violation.message
+        # The violation holds the state the verdict rests on, so a trace
+        # file of the run holds the verdict.
+        text = tracefile.dumps(judged, shrunk)
+        assert tracefile.replay(judged, tracefile.loads(text)) == shrunk
+    # A shrunk run breaks the same check and need not leave the same
+    # state: the two orders are placed the other way round in 4 of the 12.
+    assert other_state == 4
+
+
+def test_trace_file_of_a_judged_failure_replays_on_the_judged_scenario():
+    base, judged = _judged_two_units()
+    run = explore.replay(judged, _BOTH_READ_FIRST)
+    saved = tracefile.loads(tracefile.dumps(judged, run))
+    assert tracefile.replay(judged, saved) == run
+    # The scenario as it was has no such check, so its run ends otherwise
+    # than the file says.
+    with pytest.raises(scheduler.ReplayDivergenceError):
+        tracefile.replay(base, saved)
+
+
+def test_solver_values_a_failure_that_only_the_oracle_sees():
+    base, judged = _judged_two_units()
+    assert solve.adaptive(base).value == 0
+    assert solve.adaptive(judged).value == 1
+    # After the first read the two wait side by side. With 1/2 the same
+    # buyer writes, and what follows is a serial order. With 1/2 the other
+    # reads 2 as well, and an update is lost.
+    assert solve.uniform(judged) == fractions.Fraction(1, 2)
+    assert solve.clairvoyant(judged) == 1
+
+
+def test_judged_scenario_reports_its_own_invariant_first():
+    base = oversell.naive(stock=1, buyers=2)
+    judged = oracle.judged(base)
+    # With one unit the same 12 schedules oversell, and a run keeps its
+    # first violation: the scenario's own, asked after every step.
+    assert [run.violation for run in explore.exhaust(judged)] == [
+        run.violation for run in explore.exhaust(base)]
+
+
+@pytest.mark.parametrize(
+    "base",
+    [oversell.atomic(stock=2, buyers=2), lost_update.naive(editors=2),
+     write_skew.naive(doctors=2)],
+    ids=lambda scenario: scenario.name)
+def test_judged_scenario_adds_no_failure_where_the_two_oracles_agree(base):
+    assert list(explore.exhaust(oracle.judged(base))) == list(
+        explore.exhaust(base))
+
+
+def test_scenario_is_not_judged_without_a_snapshot_or_with_draws():
+    with pytest.raises(
+            scheduler.MissingSnapshotError,
+            match="^the scenario 'oversell-naive' has no snapshot, so its "
+                  "runs leave no outcome to compare$"):
+        oracle.judged(dataclasses.replace(oversell.naive(), snapshot=None))
+
+    async def flipper(ctx: scheduler.AgentContext) -> None:
+        await ctx.draw("coin")
+
+    drawing = scheduler.Scenario(
+        name="flipping", make_world=_Cells, agents={"a": flipper},
+        invariants=(), snapshot=_cells)
+    # The serial orders are run with no sampler: with draws they would
+    # have to be those of the run that is judged.
+    with pytest.raises(scheduler.UnsupportedAwaitError):
+        oracle.judged(drawing)
+
+
+def test_judged_violation_shows_no_more_than_the_start_of_a_long_state():
+    async def writer(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("put", cell="x", value="short")
+
+    judged = oracle.judged(scheduler.Scenario(
+        name="cells", make_world=_Cells, agents={"a": writer}, invariants=(),
+        snapshot=_cells))
+    # No run of the one agent fails, so the check is asked by hand, of a
+    # world that no run leaves.
+    assert all(run.violation is None for run in explore.exhaust(judged))
+    world = _Cells()
+    world.put("y", "y" * 500)
+    shown = repr((None, "y" * 500))
+    assert judged.invariants[-1].check(world) == (
+        f"the run left {shown[:200]}... ({len(shown)} characters), which no "
+        "serial order leaves")
