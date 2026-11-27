@@ -228,6 +228,11 @@ class _Guide:
                 if kind == _DRAW else
                 "it waits for a choice where it drew before")
         self.then = None
+        if kind == _CHOOSE and decision not in moment.waiting:
+            # Not left to the scheduler, which looks the name up and says
+            # nothing of a start.
+            raise self._left(
+                f"agent {decision!r} does not wait where it waited before")
         return decision
 
     def _key(self, moment: scheduler.Moment) -> Hashable | None:

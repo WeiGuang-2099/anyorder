@@ -344,6 +344,43 @@ def _caller(calls: int) -> scheduler.Agent:
     return agent
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        solve.uniform,
+        solve.round_robin,
+        lambda scenario: solve.serial(scenario, ["a", "b"]),
+        solve.adaptive,
+        solve.clairvoyant,
+    ],
+    ids=["uniform", "round-robin", "serial", "adaptive", "clairvoyant"])
+def test_run_whose_chosen_agent_no_longer_waits_is_refused(value):
+    made = []
+
+    class Numbered(_Tally):
+        """A sum whose worlds are counted as they are made."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            made.append(self)
+
+    async def fading(ctx: scheduler.AgentContext) -> None:
+        if len(made) <= 1:
+            await ctx.call("add", amount=0)
+
+    # In the first run a waits beside b. The second run is to go on with
+    # a, which makes no call this time: nobody of that name waits.
+    scenario = scheduler.Scenario(
+        name="fading", make_world=Numbered,
+        agents={"a": fading, "b": _caller(2)},
+        invariants=(), snapshot=lambda tally: tally.total)
+    with pytest.raises(scheduler.ReplayDivergenceError) as caught:
+        value(scenario)
+    assert str(caught.value) == (
+        "a run of 'fading' left the start it was given to follow: agent 'a' "
+        "does not wait where it waited before")
+
+
 def test_run_is_followed_for_as_many_choices_and_draws_as_the_limit():
     scenario = _tallying(a=_caller(5))
     assert solve.uniform(scenario, limit=5) == 0
