@@ -223,7 +223,7 @@ def test_request_that_is_no_written_distribution_is_refused():
     scenario = _tallying(a=guesser)
     for value in (
             solve.uniform, solve.round_robin, solve.adaptive,
-            lambda given: solve.serial(given, ["a"])):
+            solve.clairvoyant, lambda given: solve.serial(given, ["a"])):
         with pytest.raises(
                 scheduler.UnsupportedValueError,
                 match="^agent 'a' cannot draw from 'coin': a written "
@@ -273,6 +273,12 @@ def test_scenario_that_is_not_the_same_twice_is_refused():
             match="^step 1 is note\\(seen=2\\), but agent 'a' waits to call "
                   "note\\(seen=3\\)$"):
         solve.uniform(drifting(teller))
+    for value in (solve.adaptive, solve.clairvoyant):
+        made.clear()
+        with pytest.raises(
+                scheduler.ReplayDivergenceError,
+                match="^a run of 'drifting' replayed its start"):
+            value(drifting(asker))
 
 
 def _caller(calls: int) -> scheduler.Agent:
@@ -309,8 +315,9 @@ def test_run_is_followed_for_as_many_choices_and_draws_as_the_limit():
         solve.round_robin,
         lambda scenario: solve.serial(scenario, ["a"]),
         solve.adaptive,
+        solve.clairvoyant,
     ],
-    ids=["uniform", "round-robin", "serial", "adaptive"])
+    ids=["uniform", "round-robin", "serial", "adaptive", "clairvoyant"])
 def test_agent_that_never_ends_is_refused(value):
     async def caller(ctx: scheduler.AgentContext) -> None:
         while True:
@@ -515,3 +522,108 @@ def test_failing_run_is_replayed_before_it_is_returned():
                   "trace$"):
         solve.adaptive(scenario)
     assert solve.uniform(scenario) == 1
+
+
+class _SetsAfter:
+    """A table of the tests' own: whether a sets, by what it read."""
+
+    def __init__(self, *sets: bool) -> None:
+        self._sets = sets
+
+    def sample(
+        self, agent: str, request: Any, moment: scheduler.Moment
+    ) -> bool:
+        (read,) = (step for step in moment.steps if step.tool == "read")
+        return self._sets[read.result]
+
+
+def test_clairvoyant_scheduler_loses_an_inc_five_times_in_eight():
+    scenario = _counting()
+    # A table of draws holds one for each place a can stand at when it
+    # draws: after a read of 0, of 1 and of 2. A scheduler that knows the
+    # table lets a read 0 if the table has it set there, and 1 if it sets
+    # there, and in both cases an inc is left to put before the set. A
+    # set after a read of 2 loses nothing. So some schedule fails unless
+    # the table has a stop at 0 and at 1: 1 - 3/4 * 1/2 = 5/8.
+    assert solve.clairvoyant(scenario) == Fraction(5, 8)
+    # The same from the eight tables, each searched through.
+    total = Fraction(0)
+    for sets in itertools.product([True, False], repeat=3):
+        chance = Fraction(1 if sets[0] else 3, 4) / 2 / 2
+        runs = list(explore.exhaust(scenario, _SetsAfter(*sets)))
+        fails = any(run.violation is not None for run in runs)
+        assert fails == (sets[0] or sets[1])
+        total += chance * fails
+    assert total == Fraction(5, 8)
+    # Knowing the draws to come is worth more than seeing those made.
+    assert solve.adaptive(scenario).value < Fraction(5, 8)
+
+
+def test_clairvoyant_value_does_not_go_by_the_names():
+    assert solve.clairvoyant(_counting("b")) == Fraction(5, 8)
+    assert solve.clairvoyant(_counting("c")) == Fraction(5, 8)
+
+
+def test_with_one_agent_every_scheduler_is_the_same():
+    async def roller(ctx: scheduler.AgentContext) -> None:
+        first = await ctx.draw(((1, 1), (2, 2)))
+        second = await ctx.draw(((1, 1), (2, 2)))
+        await ctx.call("add", amount=first + second)
+
+    for total, chance in ((4, Fraction(4, 9)), (3, Fraction(4, 9)),
+                          (2, Fraction(1, 9)), (5, Fraction(0))):
+        scenario = _tallying(_never(total), a=roller)
+        assert solve.clairvoyant(scenario) == chance
+        assert solve.adaptive(scenario).value == chance
+        assert solve.uniform(scenario) == chance
+
+
+def test_table_holds_one_draw_for_each_place_and_not_for_each_draw():
+    async def twice(ctx: scheduler.AgentContext) -> None:
+        # Two draws from the same thing, at two places: the second comes
+        # after the first.
+        first = await ctx.draw(_EVENLY)
+        second = await ctx.draw(_EVENLY)
+        await ctx.call("add", amount=first + second)
+
+    async def other(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("add", amount=await ctx.draw(_EVENLY))
+
+    # a adds 0, 1 or 2 and b adds 0 or 1, each draw apart from the others.
+    # The sum is 3 when all three give True: 1/8. No schedule changes it.
+    scenario = _tallying(_never(3), a=twice, b=other)
+    assert solve.clairvoyant(scenario) == Fraction(1, 8)
+    assert solve.adaptive(scenario).value == Fraction(1, 8)
+
+
+@pytest.mark.parametrize(
+    "scenario,calls",
+    [
+        (oversell.naive(stock=1, buyers=2), 6),
+        (oversell.naive(stock=1, buyers=3), 9),
+        (lost_update.naive(editors=3), 6),
+        (write_skew.naive(doctors=3), 6),
+        (write_skew.cas(doctors=3), 6),
+    ],
+    ids=lambda given: getattr(given, "name", str(given)))
+def test_clairvoyant_value_of_an_example_that_fails_is_1(scenario, calls):
+    # Nothing is drawn, so there is one table and nothing to know ahead:
+    # the value is whether a schedule fails.
+    assert solve.clairvoyant(scenario, limit=calls) == 1
+
+
+@pytest.mark.parametrize(
+    "scenario,calls",
+    [
+        (oversell.naive(stock=2, buyers=2), 6),
+        (oversell.atomic(stock=1, buyers=3), 3),
+        (lost_update.cas(editors=2), 6),
+        (lost_update.cas(editors=3), 12),
+        (write_skew.atomic(doctors=3), 3),
+    ],
+    ids=lambda given: getattr(given, "name", str(given)))
+def test_clairvoyant_value_of_a_control_is_0(scenario, calls):
+    assert solve.clairvoyant(scenario, limit=calls) == 0
+    # Every schedule was tried for that, the longest among them.
+    with pytest.raises(solve.TooLongError):
+        solve.clairvoyant(scenario, limit=calls - 1)

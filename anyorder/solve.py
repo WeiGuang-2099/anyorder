@@ -11,6 +11,9 @@ as an exact fraction for the schedulers a result is held against:
 * adaptive: the scheduler that does the most harm of all that see
   everything that has happened and every waiting call, and no draw that is
   still to come. With it comes one failing run.
+* clairvoyant: the scheduler that also knows every draw to come. Its
+  value is the chance, over the tables of draws, that some schedule
+  fails.
 
 A failure is a broken invariant of the scenario, as it is for every search:
 a run fails if it breaks what must hold after every step, also when the
@@ -36,11 +39,13 @@ from __future__ import annotations
 
 import dataclasses
 import fractions
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from typing import Any
 
+from anyorder import configuration
 from anyorder import explore
 from anyorder import scheduler
+from anyorder import values
 
 Fraction = fractions.Fraction
 
@@ -84,6 +89,27 @@ class _Stop(Exception):
         self.edge = edge
 
 
+class _Hole(Exception):
+    """Ends a run at a place its table has no draw for.
+
+    Attributes:
+        place: The place: the agent, its local history and the key of
+            what it asks to draw from, as a table sampler holds one.
+        agent: The agent that draws there.
+        request: What it asks to draw from.
+    """
+
+    def __init__(self, place: Hashable, agent: str, request: Any) -> None:
+        super().__init__()
+        self.place = place
+        self.agent = agent
+        self.request = request
+
+
+# One draw for each place: a table of draws, as far as it has been needed.
+_Table = dict[Hashable, Any]
+
+
 # A decision: the agent that is chosen, or the outcome that is drawn.
 _Decision = tuple[str, Any]
 _CHOOSE = "choose"
@@ -95,7 +121,9 @@ class _Guide:
 
     They follow the steps and the draws of the start as a replay does,
     make one more decision if they are given one, and stop the run where
-    it asks for the next.
+    it asks for the next. Given a table, a draw past the start is no
+    decision: it is the draw the table holds at that place, and the run
+    stops only at a place the table lacks.
     """
 
     def __init__(
@@ -105,6 +133,7 @@ class _Guide:
         draws: Sequence[scheduler.Drawn],
         then: _Decision | None,
         limit: int,
+        table: _Table | None,
     ) -> None:
         self._scenario = scenario
         self._steps = steps
@@ -113,6 +142,7 @@ class _Guide:
         self._sampler = scheduler.ReplaySampler(draws)
         self.then = then
         self._limit = limit
+        self._table = table
         self._asked = 0
         self._chosen = 0
         self._drawn = 0
@@ -144,8 +174,15 @@ class _Guide:
         # Here, so that a request the package refuses is refused with the
         # agents closed, as a sampler refuses it.
         scheduler.weights(agent, request)
-        return self._decide(_DRAW, _Edge(
-            moment.steps, moment.draws, agent=agent, request=request))
+        if self._table is None:
+            return self._decide(_DRAW, _Edge(
+                moment.steps, moment.draws, agent=agent, request=request))
+        place = (
+            agent, configuration.local_history(moment, agent),
+            values.key(request))
+        if place not in self._table:
+            raise _Hole(place, agent, request)
+        return self._table[place]
 
     def _count(self) -> None:
         """Counts one more choice or draw that the run asks for."""
@@ -230,19 +267,46 @@ class _Search:
                 among, merge, reached.steps, reached.draws, (_DRAW, outcome))
         return total
 
+    def some_schedule_fails(
+        self,
+        table: _Table,
+        steps: Sequence[scheduler.Step] = (),
+        draws: Sequence[scheduler.Drawn] = (),
+        then: _Decision | None = None,
+    ) -> bool:
+        """Says whether a schedule fails from a point on, under a table.
+
+        Under a table the agents are a program with no chance left in
+        it: every draw is given, and only the choices are tried.
+
+        Raises:
+            _Hole: A run came to a place the table has no draw for.
+        """
+        reached = self._advance(steps, draws, then, table)
+        if isinstance(reached, scheduler.RunResult):
+            return reached.violation is not None
+        for name in reached.waiting:
+            if self.some_schedule_fails(
+                    table, reached.steps, reached.draws, (_CHOOSE, name)):
+                return True
+        return False
+
     def _advance(
         self,
         steps: Sequence[scheduler.Step],
         draws: Sequence[scheduler.Drawn],
         then: _Decision | None,
+        table: _Table | None = None,
     ) -> _Edge | scheduler.RunResult:
         """Runs a start and one decision, to the next edge or to the end.
 
         Raises:
             ReplayDivergenceError: The run did not make its start again.
+            _Hole: The run is under a table and came to a place the table
+                has no draw for.
         """
         scenario = self._scenario
-        guide = _Guide(scenario, steps, draws, then, self._limit)
+        guide = _Guide(scenario, steps, draws, then, self._limit, table)
         try:
             reached: _Edge | scheduler.RunResult = scheduler.run(
                 scenario, guide, guide)
@@ -418,3 +482,45 @@ def adaptive(scenario: scheduler.Scenario, *, limit: int = LIMIT) -> Adaptive:
             f"a failing run of {scenario.name!r} replayed to a different "
             "trace")
     return Adaptive(value, failure)
+
+
+def clairvoyant(
+    scenario: scheduler.Scenario, *, limit: int = LIMIT
+) -> Fraction:
+    """Returns the chance that some schedule fails, over the tables of draws.
+
+    A table holds one draw for each place: an agent, what it has seen and
+    done, and what it asks to draw from. Under a table the scenario is a
+    program with no chance left in it, and a scheduler that knows the
+    table breaks it if any schedule does. No scheduler does more harm, and
+    one that must choose before a draw is made cannot count on as much.
+
+    A table is filled in as the search comes to its places: at a place it
+    lacks, the tables that give each outcome there are taken apart, each
+    with the outcome's chance. So the work can grow with the product of
+    the outcomes over the places, and nothing is promised of its cost.
+
+    Args:
+        scenario: What to solve, as uniform takes it.
+        limit: How many choices and draws a run is followed for.
+
+    Raises:
+        TooLongError: A run went past the limit.
+        ReplayDivergenceError: A run did not make its start again.
+        UnsupportedValueError: An agent asked to draw from something that
+            is no written distribution.
+    """
+    return _over_tables(_Search(scenario, limit), {})
+
+
+def _over_tables(search: _Search, table: _Table) -> Fraction:
+    """Returns the chance of a failing schedule over the tables that hold
+    the draws of one table, wherever it has any."""
+    try:
+        return Fraction(search.some_schedule_fails(table))
+    except _Hole as hole:
+        total = Fraction(0)
+        for outcome, chance in _chances(hole.agent, hole.request):
+            total += chance * _over_tables(
+                search, {**table, hole.place: outcome})
+        return total
