@@ -243,10 +243,19 @@ entries do, so both writes go through.
   An agent cannot be copied in the middle of a run, so the solver reaches
   a point by running again: one run for each choice and each outcome of a
   draw, its start replayed from the steps and draws of the run before.
-  Every run goes to its end. What follows a configuration is worked out
-  once and looked up after that, by the state of the world as
-  `values.key` writes it, the local histories and whether an invariant
-  has broken on the way. With `lookup=False` every run is made.
+  Every run that is made goes to its end. `solve.uniform`,
+  `solve.adaptive` and `solve.clairvoyant` try every choice, also once a
+  schedule has failed, so whatever ends a run under a schedule, such as a
+  call to a tool the world lacks, ends those three as it ends an
+  exhaustive search. `solve.serial` and `solve.round_robin` follow one
+  schedule each and meet only what ends a run under it. The clairvoyant
+  value is worked out one table at a time, and its search starts again
+  from the first step at each place a table lacks. What follows a
+  configuration is worked out once and looked up after that, by the
+  state of the world as `values.key` writes it, the local histories and
+  whether an invariant has broken on the way. With `lookup=False` every
+  run of a search is made. `solve.serial` and `solve.round_robin` look
+  nothing up.
 
 Seeds find schedules and draws. The schedule, with the draws, is what a
 failure is stored and reported as.
@@ -308,8 +317,10 @@ as its `snapshot`. It gives the state of a world as a value that can be
 hashed and that is equal for two worlds in the same state, such as a tuple
 of numbers and strings, and so says what counts as ending the same. It
 must say everything of the world that a later call or a later check can
-go by. A scenario that is never asked for the state of its world needs
-none.
+go by. The solver needs one as well where it looks runs up, which it does
+unless it is told `lookup=False`, and there the state must be made of
+values a call carries. A scenario that is never asked for the state of
+its world needs none.
 
 ## Limits
 
@@ -397,7 +408,8 @@ none.
   were built with, still share it. The scheduler sees calls and nothing
   else.
 * Search is uniform random or exhaustive. Neither prunes equivalent
-  schedules.
+  schedules. The solver alone works out once what follows a
+  configuration.
 * Shrinking ends at a failure that none of its moves makes smaller. That
   is not always the smallest one. The tests compare it with exhaustive
   search: for the sizes of the three examples that they cover, it reaches
@@ -440,20 +452,26 @@ none.
   came of it to the world. A failure that the serial orders share is not
   seen at all: that takes an invariant.
 * A failure that only the oracle sees is searched for and shrunk through
-  `oracle.judged`, for a scenario whose agents do not draw. A shrunk run
-  breaks the same check and can leave another state that no serial order
-  leaves than the run it came from: its violation says which. A trace
-  file of such a run replays on the scenario that `oracle.judged` gave,
-  and not on the one it was made from. A run that also breaks an
+  `oracle.judged`, for a scenario whose agents do not draw: a run of the
+  scenario it gives ends with an error at a draw, since the oracle does
+  not judge a run that drew and its check sees the world alone. A shrunk
+  run breaks the same check and can leave another state that no serial
+  order leaves than the run it came from: its violation says which. A
+  trace file of such a run replays on the scenario that `oracle.judged`
+  gave, and not on the one it was made from. A run that also breaks an
   invariant of the scenario is reported for that one. The demo searches
   the scenarios as they are, with no such check. The oracle has no bound
   either: it runs the n! serial orders of n agents, each twice, and every
   agent must finish in each of them.
 * An exact value is the scenario's only if every run ends. The solver
   follows a run for a number of choices and draws, `solve.LIMIT` unless
-  it is told another, and past that it refuses and gives no value. Its
-  search is as deep as a run is long, so a number near Python's recursion
-  limit ends in a RecursionError.
+  it is told another, and past that it refuses and gives no value. With
+  runs looked up, that holds the runs that are made: a run is followed
+  no further than a configuration that is known, so a long run that
+  comes to one is not counted, and whether it is refused goes by which
+  run the search made first. The search is one call of Python's stack
+  deep for each choice and draw of a run, so a number near Python's
+  recursion limit ends in a RecursionError.
 * With runs looked up, an exact value rests on the snapshot. A snapshot
   that leaves out something a later call or check goes by makes two runs
   one that are not, and the solver then gives another value with no
@@ -463,12 +481,18 @@ none.
   carries, such as a frozenset.
 * The solver replays the start of every run, which probes whether a
   scenario is the same twice and does not prove it: a check at the end
-  that is not the same twice is not seen.
+  that is not the same twice is not seen. The clairvoyant search makes
+  other runs than the others, and it starts again at each place a table
+  lacks and holds no run against the one before across such a place. So
+  a scenario that the other values refuse can get a value from it, and
+  one that draws from something else in every run ends it in a
+  RecursionError.
 * The solver's work grows with the number of schedules times the outcomes
   of the draws, or with the number of configurations where runs are
   looked up. The clairvoyant value takes the tables of draws apart place
-  by place, which can grow with the product of the outcomes over the
-  places. Nothing is promised of either.
+  by place and tries every schedule under each, which can grow with the
+  product of the outcomes over the places. Nothing is promised of
+  either.
 * Round robin goes by the names of the agents: the same agents under other
   names take their turns in another order and can have another value.
   The value of a serial order is a failure rate over fresh draws, and not

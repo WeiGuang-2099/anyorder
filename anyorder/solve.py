@@ -22,11 +22,25 @@ world is whole again later, or what must hold at the end.
 An agent cannot be copied in the middle of a run, so a point of a run is
 reached by running again: one run for each choice and for each outcome of
 a draw, its start replayed from the steps and the draws of the run before.
-A scenario that is not the same twice is therefore refused here as an
-exhaustive search refuses it, where the replay sees it: an agent that
-waits to make another call, asks to draw from something else, or is
-answered otherwise. Every run goes to its end and every choice is tried,
-also once a schedule has failed, so whatever ends a run ends the search.
+A scenario that is not the same twice is therefore refused here where
+the replay sees it: an agent that waits to make another call, asks to
+draw from something else, or is answered otherwise. That probes and does
+not prove: the runs that are held against each other are the ones this
+search happens to make, which are not those of an exhaustive search.
+Every run that is made goes to its end. The uniform, the adaptive and
+the clairvoyant search try every choice, also once a schedule has
+failed, so whatever ends a run under any schedule ends them. A serial
+order and round robin follow one schedule each, and meet only what ends
+a run under it.
+
+The clairvoyant value is worked out one table at a time. Under a table a
+draw is given and is no decision, and at a place the table lacks the
+search starts again from the first step, once for each outcome there. So
+it makes other runs than the other values do, and holds no run against
+the one before it across such a place: a scenario that is not the same
+twice can get a value here where the other values refuse it, and one
+that asks to draw from something else in every run makes a new place
+every time and ends in Python's RecursionError.
 
 Two runs that stand at one configuration go on alike, so what follows a
 configuration is worked out once and looked up after that. A run is
@@ -69,7 +83,10 @@ class TooLongError(scheduler.SchedulerError):
     """A run went past the number of choices and draws it is followed for.
 
     A value is exact only if every run ends, so a run that is cut has
-    none.
+    none. The count is of a run that is made. Where runs are looked up, a
+    run is followed no further than a configuration that is known, so a
+    long run that comes to one is not counted, and whether it is refused
+    goes by which run the search made first.
     """
 
 
@@ -192,8 +209,9 @@ class _Guide:
             return value
         if self._chosen < len(self._steps):
             raise self._left("it draws where it made a call before")
-        # Here, so that a request the package refuses is refused with the
-        # agents closed, as a sampler refuses it.
+        # Here, before an outcome is handed over and before the run is
+        # looked up: a request that is no written distribution has no
+        # outcome, and is refused as a sampler refuses it.
         scheduler.weights(agent, request)
         if self._table is None:
             return self._decide(_DRAW, moment, agent, request)
@@ -436,7 +454,8 @@ class _Search:
                     f"a run of {scenario.name!r} ended at the start it was "
                     "given to follow, where it went on before")
         # A replay holds each call and each request against the start. The
-        # results are held here, once the run is back.
+        # results are held here, once the run is back. The draws are held
+        # a second time: the guide gave each of them back at its step.
         if (tuple(reached.steps[:len(steps)]) != tuple(steps)
                 or tuple(reached.draws[:len(draws)]) != tuple(draws)):
             raise scheduler.ReplayDivergenceError(
@@ -477,7 +496,9 @@ def uniform(
     Args:
         scenario: What to solve. Every draw of its agents must be from a
             written distribution, and every run must end.
-        limit: How many choices and draws a run is followed for.
+        limit: How many choices and draws a run is followed for. A run
+            that is looked up is followed no further, so with lookup a
+            run longer than this need not be refused.
         lookup: Whether runs are looked up by where they stand. The value
             is then exact only if the scenario's snapshot says everything
             of the world that a later call or check goes by. Without it
@@ -510,7 +531,8 @@ def serial(
     Each agent makes all its calls before the next makes one. The draws
     come by their weights: this is the failure rate of one serial
     scheduler over fresh draws, and not the oracle's serial orders, which
-    are held against one run.
+    are held against one run. No run is looked up, so the scenario needs
+    no snapshot.
 
     Args:
         scenario: What to solve, as uniform takes it.
@@ -559,7 +581,8 @@ def round_robin(
 
     The turn goes round in name order, from the first name, and passes
     over an agent that does not wait. So the value goes by the names: the
-    same agents under other names take their turns in another order.
+    same agents under other names take their turns in another order. No
+    run is looked up, so the scenario needs no snapshot.
 
     Args:
         scenario: What to solve, as uniform takes it.
@@ -667,7 +690,8 @@ def clairvoyant(
     this search as it ends the uniform and the adaptive one, once the
     tables before that one have been gone through. So the work can grow
     with the product of the outcomes over the places, and nothing is
-    promised of its cost.
+    promised of its cost. What this search holds against the start of a
+    run is less than the others hold: the module docstring says what.
 
     Args:
         scenario: What to solve, as uniform takes it.
@@ -690,8 +714,13 @@ def clairvoyant(
 
 
 def _over_tables(search: _Search, table: _Table) -> Fraction:
-    """Returns the chance of a failing schedule over the tables that hold
-    the draws of one table, wherever it has any."""
+    """Returns the chance that a schedule fails, over the tables of a kind.
+
+    Args:
+        search: Tries the schedules under a table.
+        table: The draws that every table of the kind holds. At every
+            other place such a table can hold any outcome.
+    """
     try:
         return Fraction(search.some_schedule_fails(table, {}))
     except _Hole as hole:

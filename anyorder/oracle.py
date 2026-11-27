@@ -12,8 +12,13 @@ told is not, so an agent's conclusion counts only where a tool call wrote
 it to the world. A failure that the serial orders share is not seen either:
 the invariants are the oracle for that.
 
-A run does not hold its world, so the oracle runs the schedule again to
-look at it. The scheduler is used as it is.
+A run does not hold its world, so judge runs the schedule again to look
+at it. The scheduler is used as it is.
+
+judged gives the verdict another way: as one more invariant of the
+scenario, asked of the world of the run itself once every agent has
+finished. A failure that only the oracle sees is then a violation like
+any other, with the state the run left in its message.
 """
 
 from __future__ import annotations
