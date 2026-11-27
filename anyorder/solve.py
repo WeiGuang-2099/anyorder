@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import dataclasses
 import fractions
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from typing import Any
 
 from anyorder import configuration
@@ -460,7 +460,7 @@ def uniform(
 
 def serial(
     scenario: scheduler.Scenario,
-    order: Sequence[str],
+    order: Iterable[str],
     *,
     limit: int = LIMIT,
 ) -> Fraction:
@@ -477,20 +477,36 @@ def serial(
         limit: How many choices and draws a run is followed for.
 
     Raises:
-        ValueError: The order does not name each agent once.
+        ValueError: The order does not name each agent once, holds
+            something that is not a string and nothing more, or is a set,
+            which has no first and no last.
+        TypeError: The order cannot be walked.
         TooLongError: A run went past the limit.
         ReplayDivergenceError: A run did not make its start again.
         UnsupportedValueError: An agent asked to draw from something that
             is no written distribution.
     """
     names = sorted(scenario.agents)
-    if sorted(order) != names:
+    if isinstance(order, (set, frozenset)):
+        # It would be walked as this process happens to hash its names.
+        raise ValueError(
+            f"a serial order of {scenario.name!r} is walked first to last, "
+            "and a set has no first: give a list or a tuple")
+    # Walked once, and looked at before it is put in order: an order need
+    # not be a list, and Python cannot sort a number beside a name.
+    turns = tuple(order)
+    if (any(type(name) is not str for name in turns)
+            or sorted(turns) != names):
+        if not names:
+            raise ValueError(
+                f"a serial order of {scenario.name!r} names nobody: the "
+                "scenario has no agents")
         raise ValueError(
             f"a serial order of {scenario.name!r} names each of "
             f"{', '.join(names)} once")
 
     def first(edge: _Edge) -> Sequence[str]:
-        return [next(name for name in order if name in edge.waiting)]
+        return [next(name for name in turns if name in edge.waiting)]
 
     return _Search(scenario, limit, lookup=False).value(first, _only)
 

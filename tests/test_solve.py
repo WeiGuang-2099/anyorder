@@ -216,6 +216,60 @@ def test_serial_order_names_each_agent_once():
             solve.serial(scenario, order)
 
 
+def test_serial_order_of_other_things_than_names_is_refused():
+    class Loud(str):
+        """A name that is more than a string."""
+
+    scenario = _counting()
+    # Python cannot put a number in order beside a name, and what is more
+    # than a string is no name of an agent.
+    for order in (["a", "b", 3], ["a", "b", None], ["a", "b", Loud("c")]):
+        with pytest.raises(
+                ValueError,
+                match="^a serial order of 'counting' names each of a, b, c "
+                      "once$"):
+            solve.serial(scenario, order)
+
+
+def test_serial_order_is_walked_once():
+    # An order that can be walked only once is an order all the same.
+    assert solve.serial(_counting(), iter("abc")) == 0
+    assert solve.serial(_counting(), (name for name in "cab")) == 0
+
+
+@pytest.mark.parametrize(
+    "order", [{"a", "b"}, frozenset({"a", "b"})], ids=["set", "frozenset"])
+def test_serial_order_with_no_first_and_no_last_is_refused(order):
+    async def adds_one(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("add", amount=1)
+
+    async def adds_two(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("add", amount=2)
+
+    # With a first the sum is 1 after the first call, with b first never.
+    scenario = _tallying(
+        _never(1, every_step=True), a=adds_one, b=adds_two)
+    # A set of the names holds each of them once, and Python walks it in
+    # an order that changes from one process to the next: the value would.
+    with pytest.raises(ValueError) as caught:
+        solve.serial(scenario, order)
+    assert str(caught.value) == (
+        "a serial order of 'tally' is walked first to last, and a set has "
+        "no first: give a list or a tuple")
+    # A dict has an order of its own, the one its names were put in.
+    assert solve.serial(scenario, {"a": None, "b": None}) == 1
+    assert solve.serial(scenario, {"b": None, "a": None}) == 0
+
+
+def test_serial_order_for_no_agents_is_empty():
+    assert solve.serial(_tallying(), ()) == 0
+    with pytest.raises(
+            ValueError,
+            match="^a serial order of 'tally' names nobody: the scenario "
+                  "has no agents$"):
+        solve.serial(_tallying(), ["a"])
+
+
 def test_request_that_is_no_written_distribution_is_refused():
     async def guesser(ctx: scheduler.AgentContext) -> None:
         await ctx.call("add", amount=1)
