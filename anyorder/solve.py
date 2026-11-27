@@ -28,9 +28,21 @@ waits to make another call, asks to draw from something else, or is
 answered otherwise. Every run goes to its end, so whatever ends a run
 ends the search.
 
+Two runs that stand at one configuration go on alike, so what follows a
+configuration is worked out once and looked up after that. A run is
+looked up by the state of its world, written as values.key writes a
+value, by the local history of each agent that still acts, and by
+whether an invariant has broken on the way: a run that broke one has
+failed whatever follows. This rests on the scenario's snapshot. A
+snapshot that leaves out something a later call or check goes by makes
+two runs one that are not, and the value is then not the scenario's,
+with no error. Solving again with lookup=False, which needs no snapshot
+and makes every run, is the check.
+
 Nothing here is sampled, and the work grows with the number of schedules
-times the number of outcomes of the draws: this is for scenarios small
-enough to be the ground truth of a search.
+times the number of outcomes of the draws, or of configurations where
+runs are looked up: this is for scenarios small enough to be the ground
+truth of a search.
 
 Outside the scheduler: all of this is done through a policy and a sampler.
 """
@@ -72,6 +84,8 @@ class _Edge:
             at a choice.
         agent: The agent that draws, where it stopped at a draw.
         request: What that agent asked to draw from.
+        key: What the run is looked up by where it stopped, or None if
+            runs are not looked up.
     """
 
     steps: tuple[scheduler.Step, ...]
@@ -79,6 +93,7 @@ class _Edge:
     waiting: tuple[str, ...] = ()
     agent: str | None = None
     request: Any = None
+    key: Hashable | None = None
 
 
 class _Stop(Exception):
@@ -134,6 +149,7 @@ class _Guide:
         then: _Decision | None,
         limit: int,
         table: _Table | None,
+        lookup: bool,
     ) -> None:
         self._scenario = scenario
         self._steps = steps
@@ -143,6 +159,7 @@ class _Guide:
         self.then = then
         self._limit = limit
         self._table = table
+        self._lookup = lookup
         self._asked = 0
         self._chosen = 0
         self._drawn = 0
@@ -154,8 +171,7 @@ class _Guide:
             return self._policy.choose(moment)
         if self._drawn < len(self._draws):
             raise self._left("it waits for a choice where it drew before")
-        return self._decide(_CHOOSE, _Edge(
-            moment.steps, moment.draws, waiting=tuple(moment.waiting)))
+        return self._decide(_CHOOSE, moment)
 
     def sample(
         self, agent: str, request: Any, moment: scheduler.Moment
@@ -175,8 +191,7 @@ class _Guide:
         # agents closed, as a sampler refuses it.
         scheduler.weights(agent, request)
         if self._table is None:
-            return self._decide(_DRAW, _Edge(
-                moment.steps, moment.draws, agent=agent, request=request))
+            return self._decide(_DRAW, moment, agent, request)
         place = (
             agent, configuration.local_history(moment, agent),
             values.key(request))
@@ -193,10 +208,19 @@ class _Guide:
                 "choices and draws, and the solver follows no run further: "
                 "every run must end")
 
-    def _decide(self, kind: str, edge: _Edge) -> Any:
+    def _decide(
+        self,
+        kind: str,
+        moment: scheduler.Moment,
+        agent: str | None = None,
+        request: Any = None,
+    ) -> Any:
         """Makes the one decision after the start, or stops the run."""
         if self.then is None:
-            raise _Stop(edge)
+            raise _Stop(_Edge(
+                moment.steps, moment.draws,
+                waiting=() if kind == _DRAW else tuple(moment.waiting),
+                agent=agent, request=request, key=self._key(moment)))
         asked, decision = self.then
         if asked != kind:
             raise self._left(
@@ -205,6 +229,30 @@ class _Guide:
                 "it waits for a choice where it drew before")
         self.then = None
         return decision
+
+    def _key(self, moment: scheduler.Moment) -> Hashable | None:
+        """Returns what the run is looked up by where it stands.
+
+        Raises:
+            MissingSnapshotError: The scenario has no snapshot.
+            UnsupportedValueError: The snapshot gave a state that
+                values.key does not write.
+        """
+        if not self._lookup:
+            return None
+        where = configuration.at(moment)
+        try:
+            # Written as a trace file would write it: a state is held as
+            # Python compares, which takes True, 1 and 1.0 for equal, and
+            # an agent that is handed one of them can go on otherwise.
+            state = values.key(where.state)
+        except values.NotTakenError as error:
+            raise scheduler.UnsupportedValueError(
+                f"the solver cannot look the runs of {self._scenario.name!r} "
+                f"up by the state its snapshot gives: {error}. Give a state "
+                "of values a call carries, or solve with lookup=False"
+            ) from None
+        return state, where.histories, moment.violation is not None
 
     def _left(self, how: str) -> scheduler.ReplayDivergenceError:
         return scheduler.ReplayDivergenceError(
@@ -225,9 +273,13 @@ class _Search:
         failure: The first failing run met so far, if any.
     """
 
-    def __init__(self, scenario: scheduler.Scenario, limit: int) -> None:
+    def __init__(
+        self, scenario: scheduler.Scenario, limit: int, lookup: bool
+    ) -> None:
         self._scenario = scenario
         self._limit = limit
+        self._lookup = lookup
+        self._known: dict[Hashable, Fraction] = {}
         self.failure: scheduler.RunResult | None = None
 
     def value(
@@ -255,21 +307,28 @@ class _Search:
             if self.failure is None:
                 self.failure = reached
             return Fraction(1)
+        if reached.key in self._known:
+            return self._known[reached.key]
         if reached.agent is None:
-            return merge([
+            found = merge([
                 self.value(
                     among, merge, reached.steps, reached.draws,
                     (_CHOOSE, name))
                 for name in among(reached)])
-        total = Fraction(0)
-        for outcome, chance in _chances(reached.agent, reached.request):
-            total += chance * self.value(
-                among, merge, reached.steps, reached.draws, (_DRAW, outcome))
-        return total
+        else:
+            found = Fraction(0)
+            for outcome, chance in _chances(reached.agent, reached.request):
+                found += chance * self.value(
+                    among, merge, reached.steps, reached.draws,
+                    (_DRAW, outcome))
+        if reached.key is not None:
+            self._known[reached.key] = found
+        return found
 
     def some_schedule_fails(
         self,
         table: _Table,
+        known: dict[Hashable, bool],
         steps: Sequence[scheduler.Step] = (),
         draws: Sequence[scheduler.Drawn] = (),
         then: _Decision | None = None,
@@ -279,17 +338,33 @@ class _Search:
         Under a table the agents are a program with no chance left in
         it: every draw is given, and only the choices are tried.
 
+        Args:
+            table: The draws, by place.
+            known: What has been worked out under this table so far, by
+                what a run is looked up by. It is added to.
+            steps: The steps of the run up to the point.
+            draws: Its draws up to the point.
+            then: The choice to make at the point, if it is not the start
+                of a run.
+
         Raises:
             _Hole: A run came to a place the table has no draw for.
         """
         reached = self._advance(steps, draws, then, table)
         if isinstance(reached, scheduler.RunResult):
             return reached.violation is not None
+        if reached.key in known:
+            return known[reached.key]
+        found = False
         for name in reached.waiting:
             if self.some_schedule_fails(
-                    table, reached.steps, reached.draws, (_CHOOSE, name)):
-                return True
-        return False
+                    table, known, reached.steps, reached.draws,
+                    (_CHOOSE, name)):
+                found = True
+                break
+        if reached.key is not None:
+            known[reached.key] = found
+        return found
 
     def _advance(
         self,
@@ -306,7 +381,8 @@ class _Search:
                 has no draw for.
         """
         scenario = self._scenario
-        guide = _Guide(scenario, steps, draws, then, self._limit, table)
+        guide = _Guide(
+            scenario, steps, draws, then, self._limit, table, self._lookup)
         try:
             reached: _Edge | scheduler.RunResult = scheduler.run(
                 scenario, guide, guide)
@@ -345,7 +421,12 @@ def _only(numbers: Sequence[Fraction]) -> Fraction:
     return number
 
 
-def uniform(scenario: scheduler.Scenario, *, limit: int = LIMIT) -> Fraction:
+def uniform(
+    scenario: scheduler.Scenario,
+    *,
+    limit: int = LIMIT,
+    lookup: bool = True,
+) -> Fraction:
     """Returns the chance that a run fails under uniform random scheduling.
 
     At every step each waiting agent is chosen with the same chance, as
@@ -355,15 +436,25 @@ def uniform(scenario: scheduler.Scenario, *, limit: int = LIMIT) -> Fraction:
         scenario: What to solve. Every draw of its agents must be from a
             written distribution, and every run must end.
         limit: How many choices and draws a run is followed for.
+        lookup: Whether runs are looked up by where they stand. The value
+            is then exact only if the scenario's snapshot says everything
+            of the world that a later call or check goes by. Without it
+            every run is made, and no snapshot is needed.
 
     Raises:
         TooLongError: A run went past the limit.
         ReplayDivergenceError: A run did not make its start again, which
             means the scenario is not deterministic.
         UnsupportedValueError: An agent asked to draw from something that
-            is no written distribution.
+            is no written distribution. Or runs are looked up and the
+            snapshot gave a state that values.key does not write.
+        MissingSnapshotError: Runs are looked up and the scenario has no
+            snapshot.
+        TypeError: Runs are looked up and the snapshot gave a value that
+            cannot be hashed.
     """
-    return _Search(scenario, limit).value(lambda edge: edge.waiting, _mean)
+    search = _Search(scenario, limit, lookup)
+    return search.value(lambda edge: edge.waiting, _mean)
 
 
 def serial(
@@ -400,7 +491,7 @@ def serial(
     def first(edge: _Edge) -> Sequence[str]:
         return [next(name for name in order if name in edge.waiting)]
 
-    return _Search(scenario, limit).value(first, _only)
+    return _Search(scenario, limit, lookup=False).value(first, _only)
 
 
 def round_robin(
@@ -429,7 +520,8 @@ def round_robin(
         turn = names[after:] + names[:after]
         return [next(name for name in turn if name in edge.waiting)]
 
-    return _Search(scenario, limit).value(next_in_turn, _only)
+    search = _Search(scenario, limit, lookup=False)
+    return search.value(next_in_turn, _only)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -450,7 +542,12 @@ class Adaptive:
     failure: scheduler.RunResult | None
 
 
-def adaptive(scenario: scheduler.Scenario, *, limit: int = LIMIT) -> Adaptive:
+def adaptive(
+    scenario: scheduler.Scenario,
+    *,
+    limit: int = LIMIT,
+    lookup: bool = True,
+) -> Adaptive:
     """Returns the largest chance of a failing run under any scheduler.
 
     The scheduler chooses each next agent knowing all that has happened
@@ -465,15 +562,22 @@ def adaptive(scenario: scheduler.Scenario, *, limit: int = LIMIT) -> Adaptive:
     Args:
         scenario: What to solve, as uniform takes it.
         limit: How many choices and draws a run is followed for.
+        lookup: Whether runs are looked up by where they stand, as for
+            uniform.
 
     Raises:
         TooLongError: A run went past the limit.
         ReplayDivergenceError: A run did not make its start again, or the
             failing run did not replay to the same trace.
         UnsupportedValueError: An agent asked to draw from something that
-            is no written distribution.
+            is no written distribution. Or runs are looked up and the
+            snapshot gave a state that values.key does not write.
+        MissingSnapshotError: Runs are looked up and the scenario has no
+            snapshot.
+        TypeError: Runs are looked up and the snapshot gave a value that
+            cannot be hashed.
     """
-    search = _Search(scenario, limit)
+    search = _Search(scenario, limit, lookup)
     value = search.value(lambda edge: edge.waiting, max)
     failure = search.failure
     if failure is not None and explore.replay(
@@ -485,7 +589,10 @@ def adaptive(scenario: scheduler.Scenario, *, limit: int = LIMIT) -> Adaptive:
 
 
 def clairvoyant(
-    scenario: scheduler.Scenario, *, limit: int = LIMIT
+    scenario: scheduler.Scenario,
+    *,
+    limit: int = LIMIT,
+    lookup: bool = True,
 ) -> Fraction:
     """Returns the chance that some schedule fails, over the tables of draws.
 
@@ -503,21 +610,28 @@ def clairvoyant(
     Args:
         scenario: What to solve, as uniform takes it.
         limit: How many choices and draws a run is followed for.
+        lookup: Whether runs are looked up by where they stand, as for
+            uniform. What is looked up is kept for one table.
 
     Raises:
         TooLongError: A run went past the limit.
         ReplayDivergenceError: A run did not make its start again.
         UnsupportedValueError: An agent asked to draw from something that
-            is no written distribution.
+            is no written distribution. Or runs are looked up and the
+            snapshot gave a state that values.key does not write.
+        MissingSnapshotError: Runs are looked up and the scenario has no
+            snapshot.
+        TypeError: Runs are looked up and the snapshot gave a value that
+            cannot be hashed.
     """
-    return _over_tables(_Search(scenario, limit), {})
+    return _over_tables(_Search(scenario, limit, lookup), {})
 
 
 def _over_tables(search: _Search, table: _Table) -> Fraction:
     """Returns the chance of a failing schedule over the tables that hold
     the draws of one table, wherever it has any."""
     try:
-        return Fraction(search.some_schedule_fails(table))
+        return Fraction(search.some_schedule_fails(table, {}))
     except _Hole as hole:
         total = Fraction(0)
         for outcome, chance in _chances(hole.agent, hole.request):

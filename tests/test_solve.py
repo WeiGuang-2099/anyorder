@@ -5,6 +5,7 @@ with each value worked out by hand. Small worlds of the tests' own follow,
 then the examples of the package, held against a count over every schedule.
 """
 
+import dataclasses
 import fractions
 import itertools
 from typing import Any
@@ -257,7 +258,7 @@ def test_scenario_that_is_not_the_same_twice_is_refused():
     def drifting(agent: scheduler.Agent) -> scheduler.Scenario:
         return scheduler.Scenario(
             name="drifting", make_world=Drifting, agents={"a": agent},
-            invariants=())
+            invariants=(), snapshot=lambda world: None)
 
     # A point of a run is reached by running its start again. Here the
     # start is answered otherwise the second time.
@@ -512,7 +513,8 @@ def test_failing_run_is_replayed_before_it_is_returned():
     scenario = scheduler.Scenario(
         name="numbered", make_world=Numbered, agents={"a": _caller(1)},
         invariants=(
-            scheduler.Invariant("numbered", numbered, every_step=False),))
+            scheduler.Invariant("numbered", numbered, every_step=False),),
+        snapshot=lambda tally: tally.total)
     # Every run fails, and each in other words than the one before. The
     # steps of a run replay, so the search goes through, and the failure
     # it would return does not.
@@ -627,3 +629,189 @@ def test_clairvoyant_value_of_a_control_is_0(scenario, calls):
     # Every schedule was tried for that, the longest among them.
     with pytest.raises(solve.TooLongError):
         solve.clairvoyant(scenario, limit=calls - 1)
+
+
+_VALUES = [
+    solve.uniform,
+    lambda scenario, **how: solve.adaptive(scenario, **how).value,
+    solve.clairvoyant,
+]
+_VALUE_IDS = ["uniform", "adaptive", "clairvoyant"]
+
+
+def _runs_made(scenario: scheduler.Scenario, value: Any, **how: Any) -> int:
+    """Returns how many runs a value of a scenario takes to work out."""
+    made = []
+
+    def make_world() -> Any:
+        made.append(None)
+        return scenario.make_world()
+
+    value(dataclasses.replace(scenario, make_world=make_world), **how)
+    return len(made)
+
+
+def test_looking_runs_up_gives_the_values_of_the_counter_in_fewer_runs():
+    scenario = _counting()
+    assert solve.uniform(scenario, lookup=False) == Fraction(5, 36)
+    assert solve.adaptive(scenario, lookup=False).value == Fraction(1, 2)
+    assert solve.clairvoyant(scenario, lookup=False) == Fraction(5, 8)
+    assert solve.adaptive(scenario, lookup=False) == solve.adaptive(scenario)
+    # Without looking up, a run is made for every choice and every outcome
+    # on every path. Where two paths come to one configuration, the runs
+    # from there on are made once.
+    assert _runs_made(scenario, solve.uniform, lookup=False) == 51
+    assert _runs_made(scenario, solve.uniform) == 41
+
+
+@pytest.mark.parametrize("value", _VALUES, ids=_VALUE_IDS)
+@pytest.mark.parametrize(
+    "scenario,calls",
+    [
+        (oversell.naive(stock=1, buyers=3), 9),
+        (oversell.naive(stock=2, buyers=2), 6),
+        (oversell.atomic(stock=1, buyers=3), 3),
+        (lost_update.naive(editors=3), 6),
+        (lost_update.cas(editors=3), 12),
+        (write_skew.naive(doctors=3), 6),
+        (write_skew.cas(doctors=3), 6),
+        (write_skew.atomic(doctors=3), 3),
+    ],
+    ids=lambda given: getattr(given, "name", str(given)))
+def test_value_of_an_example_is_the_same_with_and_without_looking_up(
+    scenario, calls, value
+):
+    looked_up = value(scenario, limit=calls)
+    assert looked_up == value(scenario, limit=calls, lookup=False)
+    assert _runs_made(scenario, value, limit=calls) <= _runs_made(
+        scenario, value, limit=calls, lookup=False)
+
+
+def test_adaptive_value_comes_with_the_same_failing_run_either_way():
+    for scenario in (
+            oversell.naive(stock=1, buyers=3), lost_update.naive(editors=3),
+            write_skew.naive(doctors=3)):
+        assert solve.adaptive(scenario) == solve.adaptive(
+            scenario, lookup=False)
+
+
+@pytest.mark.parametrize("value", _VALUES, ids=_VALUE_IDS)
+def test_run_that_broke_an_invariant_is_not_looked_up_as_one_that_did_not(
+    value
+):
+    async def maybe_there_and_back(ctx: scheduler.AgentContext) -> None:
+        there = 1 if await ctx.draw(_EVENLY) else 0
+        await ctx.call("add", amount=there)
+        await ctx.call("add", amount=-there)
+
+    # With a done, the sum is 0 and b has done nothing, whichever way a
+    # went: one state and one history. But one of the two runs broke what
+    # must hold after every step, and it has failed whatever b does.
+    scenario = scheduler.Scenario(
+        name="tally", make_world=_Tally,
+        agents={"a": maybe_there_and_back, "b": _caller(1)},
+        invariants=(_never(1, every_step=True),),
+        snapshot=lambda tally: tally.total)
+    assert value(scenario, lookup=False) == Fraction(1, 2)
+    assert value(scenario) == Fraction(1, 2)
+
+
+class _Slot:
+    """Keeps one value, and whether it was ever seen to be True itself."""
+
+    def __init__(self) -> None:
+        self.value: Any = None
+        self.flagged = False
+
+    def put(self, value: Any) -> None:
+        self.value = value
+
+    def get(self) -> Any:
+        return self.value
+
+    def flag(self) -> None:
+        self.flagged = True
+
+
+@pytest.mark.parametrize("value", _VALUES, ids=_VALUE_IDS)
+def test_state_with_1_is_not_looked_up_as_the_state_with_true(value):
+    async def putter(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("put", value=await ctx.draw(((1, 1), (True, 1))))
+
+    async def getter(ctx: scheduler.AgentContext) -> None:
+        if await ctx.call("get") is True:
+            await ctx.call("flag")
+
+    # Python takes 1 and True for equal, and so the two states after the
+    # put. The getter does not: it goes on otherwise after each. A state
+    # is looked up as a trace file would write it, which keeps the two
+    # apart.
+    scenario = scheduler.Scenario(
+        name="slot", make_world=_Slot, agents={"a": putter, "b": getter},
+        invariants=(scheduler.Invariant(
+            "never-flagged",
+            lambda slot: "flagged" if slot.flagged else None,
+            every_step=False),),
+        snapshot=lambda slot: (slot.value, slot.flagged))
+    without = value(scenario, lookup=False)
+    assert without == value(scenario)
+    # The slot holds True one time in two, and the getter sees it if the
+    # put comes first: always for a scheduler that wants it so, and one
+    # time in two for a uniform one.
+    assert solve.uniform(scenario) == Fraction(1, 4)
+    assert solve.adaptive(scenario).value == Fraction(1, 2)
+    assert solve.clairvoyant(scenario) == Fraction(1, 2)
+
+
+def test_snapshot_that_leaves_something_out_gives_another_value_unseen():
+    async def one_way_or_another(ctx: scheduler.AgentContext) -> None:
+        first = 1 if await ctx.draw(_EVENLY) else 2
+        await ctx.call("add", amount=first)
+        await ctx.call("add", amount=2 - first)
+
+    def never_odd(tally: _Tally) -> str | None:
+        return "the sum was odd on the way" if tally.was_odd else None
+
+    # With a done the sum is 2 either way, and this snapshot says no more.
+    # The check at the end goes by whether the sum was ever odd, which it
+    # was in one run of two. Looked up by a state that leaves that out,
+    # the two runs are one, and the value is not the scenario's. Nothing
+    # tells: this is the limit that the solver's docstring names, and the
+    # mode with no lookup is the check.
+    scenario = scheduler.Scenario(
+        name="tally", make_world=_Tally,
+        agents={"a": one_way_or_another, "b": _caller(1)},
+        invariants=(scheduler.Invariant(
+            "never-odd", never_odd, every_step=False),),
+        snapshot=lambda tally: tally.total)
+    assert solve.uniform(scenario, lookup=False) == Fraction(1, 2)
+    assert solve.uniform(scenario) != Fraction(1, 2)
+    whole = dataclasses.replace(
+        scenario, snapshot=lambda tally: (tally.total, tally.was_odd))
+    assert solve.uniform(whole) == Fraction(1, 2)
+
+
+@pytest.mark.parametrize("value", _VALUES, ids=_VALUE_IDS)
+def test_scenario_with_no_snapshot_is_solved_only_without_looking_up(value):
+    scenario = dataclasses.replace(_counting(), snapshot=None)
+    with pytest.raises(
+            scheduler.MissingSnapshotError,
+            match="^the scenario 'counting' has no snapshot to give the "
+                  "state of its world$"):
+        value(scenario)
+    assert value(scenario, lookup=False) == value(_counting())
+
+
+@pytest.mark.parametrize("value", _VALUES, ids=_VALUE_IDS)
+def test_state_that_no_trace_file_writes_is_not_looked_up_by(value):
+    scenario = dataclasses.replace(
+        _counting(),
+        snapshot=lambda counter: frozenset({counter.value}))
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        value(scenario)
+    assert str(caught.value) == (
+        "the solver cannot look the runs of 'counting' up by the state its "
+        "snapshot gives: a call does not carry frozenset({0}), of type "
+        "frozenset. Give a state of values a call carries, or solve "
+        "with lookup=False")
+    assert value(scenario, lookup=False) == value(_counting())
