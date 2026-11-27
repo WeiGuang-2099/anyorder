@@ -226,7 +226,9 @@ entries do, so both writes go through.
   the end and after its own: the state the run left is the outcome of
   some serial order. A failure that only the oracle sees is then a broken
   invariant: `explore.explore` finds it, the violation says what the run
-  left, `shrink.shrink` shrinks it and a trace file holds it.
+  left, `shrink.shrink` shrinks it and a trace file holds it. The agents
+  of that scenario act as they did, and a run ends with an error where
+  one of them asks for a draw.
 * `solve` works out the chance of a failing run as an exact fraction, for
   a scenario whose agents draw from written distributions. A failure is a
   broken invariant. `solve.uniform` gives it under a uniform choice among
@@ -342,8 +344,10 @@ none.
   place, by the place or because the run cannot follow the start of its
   schedule. Shrinking and the serial-equivalence oracle do not take a
   scenario whose agents draw yet: `shrink.shrink` and `oracle.judge`
-  refuse a run that made draws before they run anything, and
-  `oracle.serial_outcomes` ends with an error at the first draw.
+  refuse a run that made draws before they run anything,
+  `oracle.serial_outcomes` ends with an error at the first draw, and so
+  does a run of a scenario that `oracle.judged` gave, also where no
+  serial order comes to that draw.
 * A table sampler seeds a generator for every draw it has not made yet,
   with the local history of the agent written out, which costs far more
   than a draw of the seeded sampler. And at every draw, held or not, it

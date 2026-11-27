@@ -21,7 +21,8 @@ from __future__ import annotations
 import dataclasses
 import functools
 import itertools
-from collections.abc import Callable, Hashable, Mapping, Sequence
+import types
+from collections.abc import Callable, Generator, Hashable, Mapping, Sequence
 from typing import Any
 
 from anyorder import explore
@@ -185,7 +186,13 @@ def judged(scenario: scheduler.Scenario) -> scheduler.Scenario:
     check.
 
     The serial orders are run here, once, as serial_outcomes runs them.
-    For a scenario whose agents do not draw.
+
+    For a scenario whose agents do not draw. A check sees the world and
+    not the draws of a run, so the agents of the scenario returned here
+    are the given ones behind a watch: each makes the calls it made, and
+    a run ends where one of them asks for a draw. An agent that draws in
+    a serial order is met here, by the scheduler, and one that draws
+    only under another schedule when a run comes to that draw.
 
     Args:
         scenario: What to judge. Its snapshot gives the state of a world.
@@ -196,7 +203,7 @@ def judged(scenario: scheduler.Scenario) -> scheduler.Scenario:
         MissingSnapshotError: The scenario has no snapshot. Nothing has
             run.
         TypeError: The snapshot gave a value that cannot be hashed.
-        UnsupportedAwaitError: An agent drew.
+        UnsupportedAwaitError: An agent drew in a serial order.
     """
     serial = serial_outcomes(scenario)
 
@@ -208,9 +215,75 @@ def judged(scenario: scheduler.Scenario) -> scheduler.Scenario:
             f"the run left {values.shown(state)}, which no serial order "
             "leaves")
 
-    return dataclasses.replace(scenario, invariants=(
-        *scenario.invariants,
-        scheduler.Invariant("serial-outcome", check, every_step=False)))
+    return dataclasses.replace(
+        scenario,
+        agents={
+            name: _ending_at_a_draw(scenario.name, name, agent)
+            for name, agent in scenario.agents.items()},
+        invariants=(
+            *scenario.invariants,
+            scheduler.Invariant("serial-outcome", check, every_step=False)))
+
+
+def _ending_at_a_draw(
+    scenario: str, name: str, agent: scheduler.Agent
+) -> scheduler.Agent:
+    """Returns an agent that acts as another does and may not draw.
+
+    The watch asks what the agent awaits as the scheduler asks it: first
+    whether it is a call, then whether it is a draw, each once. A call
+    is handed on to the scheduler as a call of the watch's own making,
+    with the tool and the arguments the agent gave, each read once and
+    the arguments only where the scheduler would read them, and what
+    the scheduler answers is handed back. A draw is not handed on, whether
+    the agent asked for it through its context or made it by hand, and
+    the sampler is not asked. Anything else is refused here in the
+    scheduler's words. So nothing of the agent's own reaches the
+    scheduler to be asked a second time and to answer otherwise.
+
+    Args:
+        scenario: The name of the scenario, for the refusal.
+        name: The agent's name in it.
+        agent: The agent to watch.
+
+    Returns:
+        The watched agent. Where the given one awaits a draw, it ends the
+        run with UnsupportedAwaitError.
+    """
+    @types.coroutine
+    def watched(ctx: scheduler.AgentContext) -> Generator[Any, Any, None]:
+        acting = agent(ctx)
+        answer = None
+        try:
+            while True:
+                try:
+                    awaited = acting.send(answer)
+                except StopIteration:
+                    return
+                if isinstance(awaited, scheduler.Effect):
+                    # Read as the scheduler reads a call: the tool, and
+                    # the arguments only of a tool it will not refuse.
+                    tool = awaited.tool
+                    answer = yield scheduler.Effect(
+                        tool, awaited.args if type(tool) is str else {})
+                elif isinstance(awaited, scheduler.Draw):
+                    raise scheduler.UnsupportedAwaitError(
+                        f"agent {name!r} of {scenario!r} awaited a draw, "
+                        "and a run that drew is not judged yet")
+                else:
+                    raise scheduler.UnsupportedAwaitError(
+                        f"agent {name!r} awaited "
+                        f"{values.name_of(type(awaited))}; an agent may "
+                        "only await AgentContext.call and AgentContext.draw")
+        finally:
+            try:
+                acting.close()
+            except Exception:
+                # As the scheduler closes an agent: an agent can fail to
+                # close, and what is on its way out came first.
+                pass
+
+    return watched
 
 
 class _SerialPolicy:

@@ -10,8 +10,10 @@ import collections
 import dataclasses
 import fractions
 import functools
+import inspect
 import itertools
-from collections.abc import Hashable
+from collections.abc import Coroutine, Hashable
+from typing import Any
 
 import pytest
 
@@ -857,7 +859,8 @@ def _judged_two_units() -> tuple[scheduler.Scenario, scheduler.Scenario]:
 def test_judged_scenario_is_the_scenario_with_one_more_check_at_the_end():
     base, judged = _judged_two_units()
     assert judged.name == base.name
-    assert judged.agents is base.agents
+    # Its agents are the scenario's, each behind a watch for a draw.
+    assert list(judged.agents) == list(base.agents)
     assert judged.make_world is base.make_world
     assert judged.snapshot is base.snapshot
     *own, added = judged.invariants
@@ -984,9 +987,605 @@ def test_scenario_is_not_judged_without_a_snapshot_or_with_draws():
         name="flipping", make_world=_Cells, agents={"a": flipper},
         invariants=(), snapshot=_cells)
     # The serial orders are run with no sampler: with draws they would
-    # have to be those of the run that is judged.
-    with pytest.raises(scheduler.UnsupportedAwaitError):
+    # have to be those of the run that is judged. They are run with the
+    # agents as they were given, so the refusal is the scheduler's own.
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError,
+            match="^agent 'a' awaited a draw, and the run has no sampler$"):
         oracle.judged(drawing)
+
+
+_ONE_OR_FIFTY = ((1, 1), (50, 1))
+
+
+class _Cell:
+    """One number that is read, raised by one and put."""
+
+    def __init__(self) -> None:
+        self.value = 0
+
+    def read(self) -> int:
+        return self.value
+
+    def inc(self) -> None:
+        self.value += 1
+
+    def put(self, value: int) -> None:
+        self.value = value
+
+
+def _torn(between_the_reads: scheduler.Agent) -> scheduler.Scenario:
+    """A reader that does more only where an inc came between its reads.
+
+    One after another the two leave 1, whichever comes first, and the
+    reader does no more than read.
+    """
+    async def reader(ctx: scheduler.AgentContext) -> None:
+        first = await ctx.call("read")
+        if first != await ctx.call("read"):
+            await between_the_reads(ctx)
+
+    async def adder(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("inc")
+
+    return scheduler.Scenario(
+        name="torn", make_world=_Cell, agents={"a": reader, "b": adder},
+        invariants=(), snapshot=lambda cell: cell.value)
+
+
+async def _puts_a_draw(ctx: scheduler.AgentContext) -> None:
+    await ctx.call("put", value=await ctx.draw(_ONE_OR_FIFTY))
+
+
+async def _puts_a_draw_made_by_hand(ctx: scheduler.AgentContext) -> None:
+    await ctx.call("put", value=await scheduler.Draw(_ONE_OR_FIFTY))
+
+
+@pytest.mark.parametrize(
+    "between_the_reads", [_puts_a_draw, _puts_a_draw_made_by_hand],
+    ids=["through-the-context", "by-hand"])
+def test_run_of_a_judged_scenario_ends_where_an_agent_asks_for_a_draw(
+    between_the_reads
+):
+    torn = _torn(between_the_reads)
+    # No serial order draws, so the serial orders are run and nothing
+    # refuses the scenario.
+    judged = oracle.judged(torn)
+    for schedule in (["a", "a", "b"], ["b", "a", "a"]):
+        assert explore.replay(judged, schedule).violation is None
+    # With the inc between its reads the reader draws, and the scenario
+    # as it was goes on with what it drew: it can leave 50, which no
+    # serial order leaves.
+    sampler = scheduler.SeededSampler(0)
+    drawn = scheduler.run(
+        torn, scheduler.ReplayPolicy(["a", "b", "a", "a"]), sampler)
+    assert [draw.request for draw in drawn.draws] == [_ONE_OR_FIFTY]
+    # The oracle does not judge a run that drew, and its check as an
+    # invariant sees the world alone. So a run of the judged scenario ends
+    # at the draw, before the sampler is asked.
+    refusal = (
+        "^agent 'a' of 'torn' awaited a draw, and a run that drew is not "
+        "judged yet$")
+    with pytest.raises(scheduler.UnsupportedAwaitError, match=refusal):
+        scheduler.run(
+            judged, scheduler.ReplayPolicy(["a", "b", "a"]), sampler)
+    with pytest.raises(scheduler.UnsupportedAwaitError, match=refusal):
+        explore.explore(judged, range(20))
+    for value in (solve.uniform, solve.adaptive, solve.clairvoyant):
+        with pytest.raises(scheduler.UnsupportedAwaitError, match=refusal):
+            value(judged)
+
+
+class _Listening:
+    """A sampler that keeps who asked it for a draw, and gives 1."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def sample(
+        self, agent: str, request: object, moment: scheduler.Moment
+    ) -> int:
+        self.asked.append(agent)
+        return 1
+
+
+def test_sampler_is_not_asked_for_a_draw_of_a_judged_scenario():
+    sampler = _Listening()
+    judged = oracle.judged(_torn(_puts_a_draw))
+    with pytest.raises(scheduler.UnsupportedAwaitError):
+        scheduler.run(judged, scheduler.ReplayPolicy(["a", "b", "a"]), sampler)
+    assert sampler.asked == []
+
+
+def test_every_agent_of_a_judged_scenario_is_watched_as_it_is_listed():
+    async def reader(ctx: scheduler.AgentContext) -> None:
+        first = await ctx.call("read")
+        if first != await ctx.call("read"):
+            await ctx.draw(_ONE_OR_FIFTY)
+
+    async def adder(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("inc")
+
+    # The agent that draws has the last name here, and is listed first.
+    judged = oracle.judged(scheduler.Scenario(
+        name="torn", make_world=_Cell, agents={"b": reader, "a": adder},
+        invariants=(), snapshot=lambda cell: cell.value))
+    assert list(judged.agents) == ["b", "a"]
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError,
+            match="^agent 'b' of 'torn' awaited a draw, and a run that drew "
+                  "is not judged yet$"):
+        scheduler.run(
+            judged, scheduler.ReplayPolicy(["b", "a", "b"]),
+            scheduler.SeededSampler(0))
+
+
+def test_draw_of_a_kind_of_its_own_is_a_draw_for_the_watch():
+    class Marked(scheduler.Draw):
+        """A draw that is more than a draw."""
+
+    async def puts_a_marked_draw(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("put", value=await Marked(_ONE_OR_FIFTY))
+
+    torn = _torn(puts_a_marked_draw)
+    sampler = scheduler.SeededSampler(0)
+    # The scheduler takes it for a draw, so the watch must as well.
+    drawn = scheduler.run(
+        torn, scheduler.ReplayPolicy(["a", "b", "a", "a"]), sampler)
+    assert len(drawn.draws) == 1
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError, match="is not judged yet$"):
+        scheduler.run(
+            oracle.judged(torn), scheduler.ReplayPolicy(["a", "b", "a"]),
+            sampler)
+
+
+def test_draw_after_a_call_that_gave_nothing_ends_a_judged_run():
+    async def incs_and_draws(ctx: scheduler.AgentContext) -> None:
+        # The answer before the draw is None, where a read gives a number.
+        assert await ctx.call("inc") is None
+        await ctx.call("put", value=await ctx.draw(_ONE_OR_FIFTY))
+
+    judged = oracle.judged(_torn(incs_and_draws))
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError, match="is not judged yet$"):
+        scheduler.run(
+            judged, scheduler.ReplayPolicy(["a", "b", "a", "a"]),
+            scheduler.SeededSampler(0))
+
+
+def test_judged_scenario_takes_a_call_that_is_also_a_draw_for_a_call():
+    class Both(scheduler.Effect, scheduler.Draw):
+        """A call, since the scheduler asks first whether it is one."""
+
+    async def by_hand(ctx: scheduler.AgentContext) -> None:
+        await Both("inc", {})
+
+    async def adder(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("inc")
+
+    base = scheduler.Scenario(
+        name="cell", make_world=_Cell, agents={"a": by_hand, "b": adder},
+        invariants=(), snapshot=lambda cell: cell.value)
+    sampler = _Listening()
+    run = scheduler.run(base, scheduler.ReplayPolicy(["a", "b"]), sampler)
+    assert [step.tool for step in run.steps] == ["inc", "inc"]
+    assert run.draws == ()
+    # So the agent drew nothing, and behind the watch it acts as it did.
+    assert scheduler.run(
+        oracle.judged(base), scheduler.ReplayPolicy(["a", "b"]),
+        sampler) == run
+    assert sampler.asked == []
+
+
+class _Turning:
+    """Something that says another thing of its class each time it is asked.
+
+    The scheduler asks what an agent awaits whether it is a call and then
+    whether it is a draw, each time by its class. This answers with the
+    classes it was given, one for each asking, and with the last of them
+    from then on.
+    """
+
+    request = _ONE_OR_FIFTY
+    tool = "inc"
+    args: dict[str, object] = {}
+
+    def __init__(self, *says: type) -> None:
+        self._says = list(says)
+
+    @property
+    def __class__(self) -> type:
+        if len(self._says) > 1:
+            return self._says.pop(0)
+        return self._says[0]
+
+    def __await__(self):
+        return (yield self)
+
+
+def test_judged_scenario_ends_at_what_the_scheduler_takes_for_a_draw():
+    async def awaits_what_is_late(ctx: scheduler.AgentContext) -> None:
+        await _Turning(object, scheduler.Draw)
+
+    torn = _torn(awaits_what_is_late)
+    sampler = _Listening()
+    # Asked the second time, it is a draw: the scheduler makes it.
+    run = scheduler.run(torn, scheduler.ReplayPolicy(["a", "b", "a"]), sampler)
+    assert [drawn.agent for drawn in run.draws] == ["a"]
+    assert sampler.asked == ["a"]
+    # The watch asks as the scheduler does, in the same order.
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError, match="is not judged yet$"):
+        scheduler.run(
+            oracle.judged(torn), scheduler.ReplayPolicy(["a", "b", "a"]),
+            sampler)
+    assert sampler.asked == ["a"]
+
+
+def test_judged_scenario_hands_on_nothing_that_could_be_a_draw_later():
+    async def awaits_what_is_later(ctx: scheduler.AgentContext) -> None:
+        await _Turning(object, object, scheduler.Draw)
+
+    torn = _torn(awaits_what_is_later)
+    sampler = _Listening()
+    # Asked twice, it is neither a call nor a draw, and the scheduler
+    # refuses it.
+    with pytest.raises(scheduler.UnsupportedAwaitError) as plain:
+        scheduler.run(torn, scheduler.ReplayPolicy(["a", "b", "a"]), sampler)
+    # The watch has asked twice as well. It hands nothing of the agent's
+    # on for the scheduler to ask again, and refuses in the same words.
+    with pytest.raises(scheduler.UnsupportedAwaitError) as judged:
+        scheduler.run(
+            oracle.judged(torn), scheduler.ReplayPolicy(["a", "b", "a"]),
+            sampler)
+    assert str(judged.value) == str(plain.value) == (
+        "agent 'a' awaited _Turning; an agent may only await "
+        "AgentContext.call and AgentContext.draw")
+    assert sampler.asked == []
+
+
+def test_judged_scenario_hands_on_a_call_of_its_own_making():
+    async def awaits_what_turns(ctx: scheduler.AgentContext) -> None:
+        await _Turning(scheduler.Effect, scheduler.Draw)
+
+    torn = _torn(awaits_what_turns)
+    sampler = _Listening()
+    schedule = ["a", "b", "a", "a"]
+    # Asked the first time, it is a call, and the scheduler makes it.
+    run = scheduler.run(torn, scheduler.ReplayPolicy(schedule), sampler)
+    assert [step.tool for step in run.steps] == ["read", "inc", "read", "inc"]
+    assert run.draws == ()
+    # The watch asks once as well, and hands on a call of its own with
+    # that tool and those arguments. Asked again, what the agent awaited
+    # would say that it is a draw.
+    judged = scheduler.run(
+        oracle.judged(torn), scheduler.ReplayPolicy(schedule), sampler)
+    assert judged.steps == run.steps
+    assert judged.draws == ()
+    assert sampler.asked == []
+    # The run drew nothing, so it is judged: two incs where every serial
+    # order has one.
+    assert judged.violation == scheduler.Violation(
+        _NO_SERIAL_ORDER, "the run left 2, which no serial order leaves", 4)
+
+
+def test_judged_scenario_asks_no_third_time_whether_it_is_a_call():
+    async def awaits_a_late_call(ctx: scheduler.AgentContext) -> None:
+        await _Turning(object, object, scheduler.Effect)
+
+    torn = _torn(awaits_a_late_call)
+    for scenario in (torn, oracle.judged(torn)):
+        with pytest.raises(
+                scheduler.UnsupportedAwaitError,
+                match="^agent 'a' awaited _Turning; an agent may only "
+                      "await AgentContext.call and AgentContext.draw$"):
+            scheduler.run(
+                scenario, scheduler.ReplayPolicy(["a", "b", "a"]),
+                _Listening())
+
+
+def test_judged_scenario_refuses_an_await_of_nothing_as_the_scheduler():
+    class Nothing:
+        """Something that awaits None."""
+
+        def __await__(self):
+            return (yield None)
+
+    async def waits(ctx: scheduler.AgentContext) -> None:
+        await Nothing()
+
+    torn = _torn(waits)
+    for scenario in (torn, oracle.judged(torn)):
+        with pytest.raises(
+                scheduler.UnsupportedAwaitError,
+                match="^agent 'a' awaited NoneType; an agent may only "
+                      "await AgentContext.call and AgentContext.draw$"):
+            scheduler.run(scenario, scheduler.ReplayPolicy(["a", "b", "a"]))
+
+
+def test_judged_scenario_reads_the_tool_and_the_arguments_once():
+    reads = []
+
+    class Shifting(scheduler.Effect):
+        """A call that names another tool and other arguments later."""
+
+        def __init__(self) -> None:
+            pass
+
+        @property
+        def tool(self) -> str:
+            reads.append("tool")
+            return "inc" if reads.count("tool") == 1 else "put"
+
+        @property
+        def args(self) -> dict[str, object]:
+            reads.append("args")
+            return {} if reads.count("args") == 1 else {"value": 40}
+
+    async def shifts(ctx: scheduler.AgentContext) -> None:
+        await Shifting()
+
+    torn = _torn(shifts)
+    schedule = ["a", "b", "a", "a"]
+    run = scheduler.run(torn, scheduler.ReplayPolicy(schedule))
+    assert [step.tool for step in run.steps] == ["read", "inc", "read", "inc"]
+    # The scheduler reads the tool and then the arguments, each once.
+    assert reads == ["tool", "args"]
+    judged = oracle.judged(torn)
+    reads.clear()
+    # So does the watch, and what it hands on is read in its place.
+    assert scheduler.run(
+        judged, scheduler.ReplayPolicy(schedule)).steps == run.steps
+    assert reads == ["tool", "args"]
+
+
+class _Name(str):
+    """A name that is more than a str."""
+
+
+@pytest.mark.parametrize(
+    "tool,args,text",
+    [
+        (_Name("inc"), {},
+         "agent 'a' cannot call a tool named 'inc', of type _Name: a "
+         "tool's name is a string"),
+        # Arguments that are no mapping end a run, also where dict could
+        # make something of them.
+        ("inc", [("value", 1)],
+         "agent 'a' cannot call 'inc': its arguments are of type list, not "
+         "a mapping"),
+    ],
+    ids=["tool", "args"])
+def test_judged_scenario_refuses_a_call_as_the_scheduler_refuses_it(
+    tool, args, text
+):
+    async def calls(ctx: scheduler.AgentContext) -> None:
+        await scheduler.Effect(tool, args)
+
+    torn = _torn(calls)
+    # The watch hands the tool and the arguments on as the agent gave
+    # them, so the run ends behind it as it ends without it.
+    for scenario in (torn, oracle.judged(torn)):
+        with pytest.raises(scheduler.UnsupportedValueError) as caught:
+            scheduler.run(scenario, scheduler.ReplayPolicy(["a", "b", "a"]))
+        assert str(caught.value) == text
+
+
+def test_judged_scenario_reads_no_arguments_of_a_refused_tool():
+    class Made(scheduler.Effect):
+        """A call of a tool with no plain name, whose arguments raise."""
+
+        def __init__(self) -> None:
+            pass
+
+        @property
+        def tool(self) -> str:
+            return _Name("inc")
+
+        @property
+        def args(self) -> dict[str, object]:
+            raise LookupError("the arguments were read")
+
+    async def calls(ctx: scheduler.AgentContext) -> None:
+        await Made()
+
+    torn = _torn(calls)
+    for scenario in (torn, oracle.judged(torn)):
+        # The scheduler refuses the tool and never reads the arguments.
+        with pytest.raises(
+                scheduler.UnsupportedValueError,
+                match="a tool's name is a string$"):
+            scheduler.run(scenario, scheduler.ReplayPolicy(["a", "b", "a"]))
+
+
+def test_judged_scenario_takes_what_says_it_is_a_call_as_the_scheduler_does():
+    class Says:
+        """Something that says by its class that it is a call."""
+
+        tool = "inc"
+        args: dict[str, object] = {}
+
+        @property
+        def __class__(self) -> type:
+            return scheduler.Effect
+
+        def __await__(self):
+            return (yield self)
+
+    async def by_hand(ctx: scheduler.AgentContext) -> None:
+        await Says()
+
+    async def adder(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("inc")
+
+    base = scheduler.Scenario(
+        name="cell", make_world=_Cell, agents={"a": by_hand, "b": adder},
+        invariants=(), snapshot=lambda cell: cell.value)
+    runs = list(explore.exhaust(base))
+    assert [run.schedule for run in runs] == [("a", "b"), ("b", "a")]
+    assert list(explore.exhaust(oracle.judged(base))) == runs
+
+
+def test_error_of_an_agent_ends_a_judged_run_as_it_ends_any_run():
+    async def fails(ctx: scheduler.AgentContext) -> None:
+        raise LookupError("the agent's own")
+
+    torn = _torn(fails)
+    for scenario in (torn, oracle.judged(torn)):
+        with pytest.raises(LookupError, match="^the agent's own$"):
+            scheduler.run(scenario, scheduler.ReplayPolicy(["a", "b", "a"]))
+
+
+def test_error_of_a_tool_reaches_the_agent_of_a_judged_scenario():
+    class Brittle(_Cell):
+        """A number that cannot be put."""
+
+        def put(self, value: int) -> None:
+            raise ValueError("no")
+
+    async def putter(ctx: scheduler.AgentContext) -> None:
+        if isinstance(await ctx.call("put", value=5), scheduler.Raised):
+            await ctx.call("inc")
+
+    base = scheduler.Scenario(
+        name="brittle", make_world=Brittle, agents={"a": putter},
+        invariants=(), snapshot=lambda cell: cell.value)
+    (run,) = explore.exhaust(oracle.judged(base))
+    assert [step.tool for step in run.steps] == ["put", "inc"]
+    assert run == explore.replay(base, ["a", "a"])
+
+
+def test_judged_run_ends_at_a_draw_whatever_the_agent_raises_as_it_closes():
+    def clinging(error: BaseException) -> scheduler.Agent:
+        async def clings(ctx: scheduler.AgentContext) -> None:
+            try:
+                await ctx.draw(_ONE_OR_FIFTY)
+            finally:
+                raise error
+
+        return clings
+
+    # An error of the agent's own is dropped as the scheduler drops it,
+    # whatever its kind: the refusal came first.
+    judged = oracle.judged(_torn(clinging(ValueError("mine"))))
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError, match="is not judged yet$"):
+        scheduler.run(judged, scheduler.ReplayPolicy(["a", "b", "a"]))
+    # An interrupt is not dropped, as the scheduler does not drop one.
+    judged = oracle.judged(_torn(clinging(KeyboardInterrupt())))
+    with pytest.raises(KeyboardInterrupt):
+        scheduler.run(judged, scheduler.ReplayPolicy(["a", "b", "a"]))
+
+
+def test_judged_scenario_can_be_judged_again():
+    once = oracle.judged(oversell.naive(stock=2, buyers=2))
+    twice = oracle.judged(once)
+    # An agent behind a watch is an agent, and can be watched.
+    assert [
+        (run.steps, run.violation is None) for run in explore.exhaust(twice)
+    ] == [
+        (run.steps, run.violation is None) for run in explore.exhaust(once)]
+
+
+def test_agents_are_closed_when_a_judged_run_ends_at_a_draw():
+    held = []
+
+    def kept(agent: scheduler.Agent) -> scheduler.Agent:
+        """Wraps an agent so that the test keeps the agent as it runs."""
+        def start(ctx: scheduler.AgentContext) -> Coroutine[Any, Any, None]:
+            held.append(agent(ctx))
+            return held[-1]
+
+        return start
+
+    async def reader(ctx: scheduler.AgentContext) -> None:
+        first = await ctx.call("read")
+        if first != await ctx.call("read"):
+            await ctx.draw(_ONE_OR_FIFTY)
+
+    async def adder(ctx: scheduler.AgentContext) -> None:
+        await ctx.call("inc")
+        await ctx.call("inc")
+
+    judged = oracle.judged(scheduler.Scenario(
+        name="torn", make_world=_Cell,
+        agents={"a": kept(reader), "b": kept(adder)},
+        invariants=(), snapshot=lambda cell: cell.value))
+    held.clear()
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError, match="is not judged yet$"):
+        scheduler.run(
+            judged, scheduler.ReplayPolicy(["a", "b", "a"]),
+            scheduler.SeededSampler(0))
+    # The reader was stopped where it asked, and the adder where it waits
+    # for its second call. The test still holds both, so nothing but the
+    # watch has closed them.
+    assert [inspect.getcoroutinestate(agent) for agent in held] == [
+        inspect.CORO_CLOSED, inspect.CORO_CLOSED]
+
+
+def test_judged_run_ends_at_a_draw_of_an_agent_that_does_not_close():
+    async def clings(ctx: scheduler.AgentContext) -> None:
+        try:
+            await ctx.draw(_ONE_OR_FIFTY)
+        finally:
+            # No agent may make a call while it is closed. The error of
+            # this one is dropped: the refusal came first.
+            await ctx.call("inc")
+
+    judged = oracle.judged(_torn(clings))
+    with pytest.raises(
+            scheduler.UnsupportedAwaitError,
+            match="^agent 'a' of 'torn' awaited a draw, and a run that drew "
+                  "is not judged yet$"):
+        scheduler.run(judged, scheduler.ReplayPolicy(["a", "b", "a"]))
+
+
+def test_judged_scenario_refuses_any_other_await_as_the_scheduler_does():
+    class Renamed(type):
+        """A metaclass whose classes say that they are named Draw."""
+
+        @property
+        def __name__(cls) -> str:
+            return "Draw"
+
+    class Other(metaclass=Renamed):
+        """Something that is neither a call nor a draw."""
+
+        def __await__(self):
+            return (yield self)
+
+    async def strays(ctx: scheduler.AgentContext) -> None:
+        await Other()
+
+    torn = _torn(strays)
+    with pytest.raises(scheduler.UnsupportedAwaitError) as plain:
+        scheduler.run(torn, scheduler.ReplayPolicy(["a", "b", "a"]))
+    with pytest.raises(scheduler.UnsupportedAwaitError) as judged:
+        scheduler.run(
+            oracle.judged(torn), scheduler.ReplayPolicy(["a", "b", "a"]))
+    # Both name the class as type holds its name, whatever it says.
+    assert str(judged.value) == str(plain.value) == (
+        "agent 'a' awaited Other; an agent may only await "
+        "AgentContext.call and AgentContext.draw")
+
+
+def test_agent_of_a_judged_scenario_can_be_awaited_as_any_agent():
+    judged = oracle.judged(oversell.naive(stock=2, buyers=2))
+    held = dict(judged.agents)
+
+    def behind(name: str) -> scheduler.Agent:
+        async def agent(ctx: scheduler.AgentContext) -> None:
+            await held[name](ctx)
+
+        return agent
+
+    # An agent that is made of another awaits it. What it is handed for
+    # each call comes back through the watch as the scheduler gave it.
+    wrapped = dataclasses.replace(
+        judged, agents={name: behind(name) for name in held})
+    assert list(explore.exhaust(wrapped)) == list(explore.exhaust(judged))
 
 
 def test_judged_violation_shows_no_more_than_the_start_of_a_long_state():
