@@ -1847,6 +1847,26 @@ def test_refusal_of_a_distribution_shows_no_more_than_the_start_of_it():
         f"{_NO_DISTRIBUTION}")
 
 
+def test_weights_of_a_written_distribution_are_given_in_its_order():
+    request = (("one", 1), ("two", 2), ("three", 3))
+    assert scheduler.weights("a", request) == [1, 2, 3]
+    # Of lists as well, as a sampler is given one that an agent built.
+    assert scheduler.weights("a", [["H", 1], ["T", 4]]) == [1, 4]
+
+
+@pytest.mark.parametrize(
+    "given",
+    ["coin", (), (("heads", 0),), (("heads", True),), (("heads", 1), "tails")],
+    ids=repr)
+def test_weights_are_refused_for_what_a_sampler_refuses(given):
+    # Whoever reads a distribution apart from a sampler is held to the
+    # sampler's rule, and told in its words.
+    with pytest.raises(scheduler.UnsupportedValueError) as caught:
+        scheduler.weights("a", given)
+    assert str(caught.value) == (
+        f"agent 'a' cannot draw from {given!r}: {_NO_DISTRIBUTION}")
+
+
 def test_draw_from_no_written_distribution_ends_the_run():
     coroutines = {}
     scenario = _scenario(

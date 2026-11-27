@@ -588,13 +588,21 @@ def pick(agent: str, request: Any, rng: random.Random) -> Any:
         UnsupportedValueError: The request is no written distribution.
             Nothing is taken from the generator.
     """
-    bounds = list(itertools.accumulate(_weights(agent, request)))
+    bounds = list(itertools.accumulate(weights(agent, request)))
     point = rng.randrange(bounds[-1])
     return request[bisect.bisect_right(bounds, point)][0]
 
 
-def _weights(agent: str, request: Any) -> list[int]:
+def weights(agent: str, request: Any) -> list[int]:
     """Returns the weights of a written distribution, in its order.
+
+    For whoever reads a distribution apart from a sampler, such as a
+    search that tries every outcome: the outcome of each weight is the
+    first part of the pair at its place in the request.
+
+    Args:
+        agent: The agent that draws, for the refusal to name.
+        request: The written distribution, as pick takes it.
 
     Raises:
         UnsupportedValueError: The request is no written distribution.
