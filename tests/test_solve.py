@@ -7,6 +7,7 @@ then the examples of the package, held against a count over every schedule.
 
 import dataclasses
 import fractions
+import inspect
 import itertools
 from typing import Any
 
@@ -426,6 +427,40 @@ def test_agent_that_never_ends_is_refused(value):
 
 def test_too_long_is_a_refusal_of_the_scheduler():
     assert issubclass(solve.TooLongError, scheduler.SchedulerError)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        solve.uniform,
+        solve.round_robin,
+        lambda scenario, **how: solve.serial(scenario, ["a"], **how),
+        solve.adaptive,
+        solve.clairvoyant,
+    ],
+    ids=["uniform", "round-robin", "serial", "adaptive", "clairvoyant"])
+def test_search_is_one_call_deeper_for_each_choice_of_a_run(value):
+    depths = []
+
+    class Deep(_Tally):
+        """A sum that keeps how deep Python's stack is at each call."""
+
+        def add(self, amount: int) -> int:
+            depths.append(len(inspect.stack(0)))
+            return super().add(amount)
+
+    value(scheduler.Scenario(
+        name="deep", make_world=Deep, agents={"a": _caller(4)},
+        invariants=(), snapshot=lambda tally: tally.total), limit=4)
+    # The run that makes the first call is made one decision into the
+    # search, the run that makes the second call two, and so on. Each
+    # decision costs the stack one call under every Python, so a run of n
+    # choices is solved within n calls of where the search started, and
+    # the limit can be set near Python's own on the depth of its stack.
+    reached = sorted(set(depths))
+    assert len(reached) == 4
+    assert [deeper - before
+            for before, deeper in zip(reached, reached[1:])] == [1, 1, 1]
 
 
 class _Counted:

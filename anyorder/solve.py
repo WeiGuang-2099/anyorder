@@ -315,11 +315,15 @@ class _Search:
         if reached.key in self._known:
             return self._known[reached.key]
         if reached.agent is None:
-            found = merge([
-                self.value(
+            # A loop and no comprehension: before Python 3.12 a
+            # comprehension is a call of its own, and the search would be
+            # two calls deep for each choice of a run.
+            ahead = []
+            for name in among(reached):
+                ahead.append(self.value(
                     among, merge, reached.steps, reached.draws,
-                    (_CHOOSE, name))
-                for name in among(reached)])
+                    (_CHOOSE, name)))
+            found = merge(ahead)
         else:
             found = Fraction(0)
             for outcome, chance in _chances(reached.agent, reached.request):
