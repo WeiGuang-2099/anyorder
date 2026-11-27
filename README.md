@@ -36,7 +36,13 @@ Early. What works today:
   file that replays to another trace than it holds is refused.
 * A serial-equivalence oracle. A run fails when it leaves its world in a
   state that no serial order of the agents leaves, whether or not it broke
-  an invariant.
+  an invariant. Its verdict can be one more invariant of a scenario, so
+  that such a failure is searched for, shrunk and written like any other.
+* Exact values. For a small scenario whose agents draw from written
+  weights, the chance of a failing run is worked out as a fraction: under
+  uniform random scheduling, with the agents one after another or in
+  turn, under the scheduler that does the most harm of all that see what
+  has happened so far, and under one that also knows every draw to come.
 * Example scenarios, an oversell, a lost update and a write skew, each
   with a control that must pass. The write skew also has a fix that must
   fail.
@@ -216,6 +222,29 @@ entries do, so both writes go through.
   look at its world and names the serial orders that end in the same
   state. With none the run failed, and it is replayed once more before
   that is reported: both replays must end in the same state.
+  `oracle.judged` gives a scenario back with one more invariant, asked at
+  the end and after its own: the state the run left is the outcome of
+  some serial order. A failure that only the oracle sees is then a broken
+  invariant: `explore.explore` finds it, the violation says what the run
+  left, `shrink.shrink` shrinks it and a trace file holds it.
+* `solve` works out the chance of a failing run as an exact fraction, for
+  a scenario whose agents draw from written distributions. A failure is a
+  broken invariant. `solve.uniform` gives it under a uniform choice among
+  the waiting agents at every step, which is what a seeded search does,
+  `solve.serial` with the agents one after another in a given order, and
+  `solve.round_robin` with one call each in turn, in name order.
+  `solve.adaptive` gives the largest chance that any scheduler reaches
+  that sees everything so far and no draw to come, with one failing run,
+  replayed before it is returned. `solve.clairvoyant` gives the chance,
+  over the tables of draws, that some schedule fails: what a scheduler
+  reaches that also knows every draw to come.
+  An agent cannot be copied in the middle of a run, so the solver reaches
+  a point by running again: one run for each choice and each outcome of a
+  draw, its start replayed from the steps and draws of the run before.
+  Every run goes to its end. What follows a configuration is worked out
+  once and looked up after that, by the state of the world as
+  `values.key` writes it, the local histories and whether an invariant
+  has broken on the way. With `lookup=False` every run is made.
 
 Seeds find schedules and draws. The schedule, with the draws, is what a
 failure is stored and reported as.
@@ -406,11 +435,43 @@ none.
   that no serial order gives is seen only where a tool call wrote what
   came of it to the world. A failure that the serial orders share is not
   seen at all: that takes an invariant.
-* A failure that only the oracle sees is reported as it was found.
-  `shrink.shrink` takes a run that broke an invariant, and
-  `explore.explore` and the demo search for one. The oracle has no bound
+* A failure that only the oracle sees is searched for and shrunk through
+  `oracle.judged`, for a scenario whose agents do not draw. A shrunk run
+  breaks the same check and can leave another state that no serial order
+  leaves than the run it came from: its violation says which. A trace
+  file of such a run replays on the scenario that `oracle.judged` gave,
+  and not on the one it was made from. A run that also breaks an
+  invariant of the scenario is reported for that one. The demo searches
+  the scenarios as they are, with no such check. The oracle has no bound
   either: it runs the n! serial orders of n agents, each twice, and every
   agent must finish in each of them.
+* An exact value is the scenario's only if every run ends. The solver
+  follows a run for a number of choices and draws, `solve.LIMIT` unless
+  it is told another, and past that it refuses and gives no value. Its
+  search is as deep as a run is long, so a number near Python's recursion
+  limit ends in a RecursionError.
+* With runs looked up, an exact value rests on the snapshot. A snapshot
+  that leaves out something a later call or check goes by makes two runs
+  one that are not, and the solver then gives another value with no
+  error. Solving again with `lookup=False` is the check: it needs no
+  snapshot and makes every run. A scenario with no snapshot is solved
+  only so, and so is one whose snapshot gives a state that no call
+  carries, such as a frozenset.
+* The solver replays the start of every run, which probes whether a
+  scenario is the same twice and does not prove it: a check at the end
+  that is not the same twice is not seen.
+* The solver's work grows with the number of schedules times the outcomes
+  of the draws, or with the number of configurations where runs are
+  looked up. The clairvoyant value takes the tables of draws apart place
+  by place, which can grow with the product of the outcomes over the
+  places. Nothing is promised of either.
+* Round robin goes by the names of the agents: the same agents under other
+  names take their turns in another order and can have another value.
+  The value of a serial order is a failure rate over fresh draws, and not
+  the oracle's serial orders, which are held against one run.
+* The failing run that comes with the adaptive value is one way to fail,
+  the first the search met. The scheduler that reaches the value is not
+  returned.
 * Replaying a run checks that it gives the same trace twice. That probes
   whether a scenario is deterministic and does not prove it.
 * A trace file holds the values a call carries, but for two: a string that
